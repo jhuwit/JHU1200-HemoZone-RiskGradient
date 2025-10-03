@@ -1,0 +1,2643 @@
+---
+title: "HARBOR- Urinary Biomarkers"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_depth: 2
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+  word_document:
+    toc: yes
+    toc_depth: '2'
+---
+```{r,include=FALSE}
+knitr::opts_chunk$set(warning=FALSE,message=FALSE)
+```
+
+```{r,include=FALSE}
+# LOAD PACKAGES
+library(rmarkdown)
+library(tidyverse)
+library(grid)
+library(consort)
+library(gtsummary)
+library(ggpubr)
+library(lubridate)
+library(purrr)
+library(stringr)
+library(slider)
+library(readr)
+library(reshape2)
+library(lme4)
+library(here)
+library(broom)
+library(broom.mixed)
+library(viridis)
+library(nlme)
+library(DT)
+library(psych)
+library(knitr)
+library(networkD3)
+library(htmlwidgets)
+library(pBrackets)
+```
+
+```{r,include=FALSE}
+# LOAD DATA 
+
+#covariates=read.csv(here::here("data","STSvariablesDEID.7.22.24.csv"))
+covariates=read.csv(here::here("data","STSvariablesDEID.7.20.25.csv"))
+ortimes= read.csv(here::here("data","ORtimesDEID.csv"))
+#biomarkers= read.csv(here::here("data","All_BiomarkerLongformHARBORAKI.9.1.24.csv"))
+
+biomarkers= read.csv(here::here("data","Allbiomarkers.ONLY.longform.1.16.25.V3.FINAL.csv"))
+hemodynamics= read_rds(here::here("data", "hemodynamics.rds"))
+
+akidata= read.csv(here::here("data", "HARBORAKI.128patients.AKI48.DO2.12.13.42.csv"))
+
+timestamp= read.csv("/scratch4/nfarada1/Marina/HARBOR-UrineBiomarkers/data/1.16.25.biomarker timepoints.DEID.csv")
+
+```
+
+
+```{r,include=FALSE}
+# PROCESS DATA
+
+
+datasets <- list(covariates, hemodynamics, ortimes, akidata, biomarkers)
+lapply(datasets, function(df) df$harbor_id <- as.factor(df$harbor_id))
+biomarkers$timepoint <- as.factor(biomarkers$timepoint)
+
+covariates= covariates[1:128, ]
+covariates <- covariates %>%
+  left_join(ortimes, by = "harbor_id") %>%
+  left_join(akidata %>% select("harbor_id","AKI_48","X48hrs_delCr"), by = "harbor_id")
+
+
+covariates= covariates %>% mutate(rfchroniclungdisease= ifelse(rfchroniclungdisease=="No","No","Yes"), 
+                                  medsbetablockerswithin24hours= ifelse(medsbetablockerswithin24hours=="Yes","Yes","No"),
+                                  rfpriorcva=ifelse(rfpriorcva=="Yes","Yes","No"))
+
+
+
+covariates <- covariates %>%
+  mutate(
+    packed_rbc = case_when(
+      is.na(intraopbloodproductsrbcunits)     ~ "0",           # NA becomes "0"
+      intraopbloodproductsrbcunits > 1        ~ ">1",          # Values > 1 become ">1"
+      TRUE         ~ as.character(intraopbloodproductsrbcunits)  # Keep 0, 1 as-is
+    ),
+    packed_rbc = factor(packed_rbc, levels = c("0", "1", ">1"))  # set factor levels
+  )
+
+
+
+##########
+
+# change picograms(pg) to nanograms (ng)
+biomarkers$NGAL=biomarkers$NGAL_pgmL/1000
+biomarkers$YKL=biomarkers$YKL40_pgmL/1000
+
+# divide biomarkers by UCR
+biomarkers$NGAL_UCR=biomarkers$NGAL/biomarkers$URCREA_mgdL # note the difference in units
+biomarkers$YKL_UCR=biomarkers$YKL/biomarkers$URCREA_mgdL # note the difference in units
+biomarkers$AL_UCR=biomarkers$mAlb_mgdL/biomarkers$URCREA_mgdL
+biomarkers$NGAL_YKL= biomarkers$NGAL/biomarkers$YKL
+biomarkers$NGAL_YKL_UCR=biomarkers$NGAL_YKL/biomarkers$URCREA_mgdL
+
+
+# log 2 biomarkers
+biomarkers$log2NGAL=log(biomarkers$NGAL, base = 2)
+biomarkers$log2NGAL_UCR=log(biomarkers$NGAL_UCR, base = 2)
+biomarkers$log2YKL=log(biomarkers$YKL, base = 2)
+biomarkers$log2YKL_UCR=log(biomarkers$YKL_UCR, base = 2)
+biomarkers$log2AL_UCR=log(biomarkers$AL_UCR, base = 2)
+biomarkers$log2_NGAL_YKL= log(biomarkers$NGAL_YKL, base=2)
+biomarkers$log2_NGAL_YKL_UCR= log(biomarkers$NGAL_YKL_UCR, base=2)
+
+biomarkers$log2akiscore=log(as.numeric(ifelse(biomarkers$akiscore=="< 0.04", 0.02, biomarkers$akiscore),base=2))
+biomarkers$akiscore=ifelse(biomarkers$akiscore=="< 0.04", 0, biomarkers$akiscore)
+biomarkers$akiscore=as.numeric(biomarkers$akiscore)
+  
+# Delta biomarkers 
+
+biowide=biomarkers %>% select(timepoint, harbor_id,NGAL, YKL, NGAL_UCR, YKL_UCR, AL_UCR, log2NGAL, log2NGAL_UCR,log2YKL_UCR,log2AL_UCR,akiscore,log2akiscore)
+biowide=biowide %>% pivot_wider(names_from = timepoint,  values_from = c(NGAL,YKL, NGAL_UCR, YKL_UCR, AL_UCR,log2NGAL, log2NGAL_UCR,log2YKL_UCR,log2AL_UCR,akiscore,log2akiscore))
+
+biowide= biowide %>% mutate(NGAL_2_0= NGAL_2-NGAL_0,
+                            log2NGAL_2_0= log2NGAL_2- log2NGAL_0,
+                            NGAL_UCR_2_0 = NGAL_UCR_2-NGAL_UCR_0,
+                            log2NGAL_UCR_0.5_0 = log2NGAL_UCR_0.5-log2NGAL_UCR_0,
+                            log2NGAL_UCR_2_0 = log2NGAL_UCR_2-log2NGAL_UCR_0,
+                            log2NGAL_2_1= log2NGAL_2- log2NGAL_1,
+                            log2NGAL_UCR_2_1 = log2NGAL_UCR_2-log2NGAL_UCR_1,
+                            log2NGAL_UCR_3_0 = log2NGAL_UCR_3-log2NGAL_UCR_0,
+                            log2NGAL_UCR_1_0.5 = log2NGAL_UCR_1-log2NGAL_UCR_0.5,
+                            log2NGAL_UCR_3_2 = log2NGAL_UCR_3-log2NGAL_UCR_2,
+                            NGAL_1_0= NGAL_1-NGAL_0,
+                            log2NGAL_1_0= log2NGAL_1-log2NGAL_0,
+                            NGAL_UCR_1_0 = NGAL_UCR_1-NGAL_UCR_0,
+                            log2NGAL_UCR_1_0 = log2NGAL_UCR_1-log2NGAL_UCR_0,
+                            YKL_UCR_2_0 = YKL_UCR_2-YKL_UCR_0,
+                            log2YKL_UCR_2_0 = log2YKL_UCR_2-log2YKL_UCR_0,
+                            YKL_UCR_1_0 = YKL_UCR_1-YKL_UCR_0,
+                            log2YKL_UCR_0.5_0 = log2YKL_UCR_0.5-log2YKL_UCR_0,
+                            log2YKL_UCR_1_0 = log2YKL_UCR_1-log2YKL_UCR_0,
+                            log2YKL_UCR_2_1 = log2YKL_UCR_2-log2YKL_UCR_1,
+                            log2YKL_UCR_3_0 = log2YKL_UCR_3-log2YKL_UCR_0,
+                            log2YKL_UCR_1_0.5 = log2YKL_UCR_1-log2YKL_UCR_0.5,
+                            log2YKL_UCR_3_2 = log2YKL_UCR_3-log2YKL_UCR_2,
+                            AL_UCR_2_0 = AL_UCR_2-AL_UCR_0,
+                            log2AL_UCR_2_0 = log2AL_UCR_2-log2AL_UCR_0,
+                            AL_UCR_1_0 = AL_UCR_1-AL_UCR_0,
+                            log2AL_UCR_1_0 = log2AL_UCR_1-log2AL_UCR_0,
+                            akiscore_1_0= akiscore_1-akiscore_0,
+                            akiscore_2_0= akiscore_2-akiscore_0,
+                            akiscore_3_0= akiscore_3-akiscore_0,
+                            log2akiscore_1_0= log2akiscore_1-log2akiscore_0,
+                            log2akiscore_2_0= log2akiscore_2-log2akiscore_0,
+                            log2akiscore_3_0= log2akiscore_3-log2akiscore_0,
+                            log2akiscore_0.5_0= log2akiscore_0.5-log2akiscore_0,
+                            log2akiscore_1_0.5= log2akiscore_1-log2akiscore_0.5,
+                            log2akiscore_2_1= log2akiscore_2-log2akiscore_1,
+                            log2akiscore_3_2= log2akiscore_3-log2akiscore_2
+                            )
+
+
+
+
+
+# calculate proctime
+start_time_posix <- as.POSIXct(ortimes$anes_start_time, format = "%m/%d/%Y %H:%M", tz = "UTC")
+end_time_posix <- as.POSIXct(ortimes$anes_end_time, format = "%m/%d/%Y %H:%M", tz = "UTC")
+time_diff <- as.numeric(end_time_posix - start_time_posix,units="mins")
+covariates$proctime=time_diff
+
+
+#CPB time using cpb1on and last cpb time
+
+df_clean <- hemodynamics %>%
+  select(harbor_id, cpb1on, cpboff_last) %>% 
+  distinct()
+
+start_time_posix <- as.POSIXct(df_clean$cpb1on, format = "%m/%d/%Y %H:%M", tz = "UTC")
+end_time_posix <- as.POSIXct(df_clean$cpboff_last, format = "%m/%d/%Y %H:%M", tz = "UTC")
+time_diff <- as.numeric(end_time_posix - start_time_posix,units="mins")
+covariates$cpbtime=time_diff
+
+
+hemodynamics = hemodynamics %>% mutate(state= case_when(CVP>12 ~ "R",
+                                                         MAP<=65 & CVP>8 ~ "R",
+                                                         MAP<=55 & !is.na(CVP)~ "R",
+                                                         MAP>75 & CVP<=8 ~"B",
+                                                         MAP>85 & CVP<=10 ~"B",
+                                                         MAP>65 & CVP>10 & CVP<=12 ~"W",
+                                                         MAP>55 & MAP<=75 & CVP<=8 ~"W",
+                                                         MAP>65 & MAP<=85 & CVP>8 & CVP<=10~"W"))
+
+hemodynamics = hemodynamics %>% mutate(zone5= case_when(MAP>45 & MAP<=55 & CVP >8 ~"zone5",
+                                                        MAP>55 & MAP<=65 & CVP >12 ~"zone5",
+                                                        MAP>65 & MAP<=75 & CVP >16 ~"zone5",
+                                                        MAP>75 & MAP<=85 & CVP >16 ~"zone5",
+                                                        MAP>85 & MAP<=95 & CVP >18 ~"zone5",
+                                                        MAP>95 & MAP<=105 & CVP >18 ~"zone5",
+                                                        MAP>105 & MAP<=115 & CVP >18 ~"zone5"))
+
+
+# Summarize the data
+datasum <- hemodynamics %>%
+  mutate(
+    lowci = CI < 2,
+    lowmap = MAP < 65,
+    lowcimap= CI<2 & MAP<65,
+    highcvp=CVP>12,
+    lowmap55 = MAP <55,
+    lowcihighcvp= CI<2 & CVP>12
+  )%>%
+  group_by(harbor_id) %>%
+  summarise(
+    lowcimins = sum(lowci, na.rm = TRUE) / 12,
+    lowmap55mins = sum(lowmap55, na.rm = TRUE) / 12,
+    lowcimapmins= sum(lowcimap, na.rm = TRUE) / 12,
+    lowcihighcvpmins= sum(lowcihighcvp,na.rm=TRUE)/12,
+    prelowcimins = sum(lowci * (wftime < cpb1on), na.rm = TRUE) / 12,
+    postlowcimins = sum(lowci * (wftime > cpboff_last), na.rm = TRUE) / 12,
+    prelowmap55mins = sum(lowmap55 * (wftime < cpb1on), na.rm = TRUE) / 12,
+    postlowmap55mins = sum(lowmap55 * (wftime > cpboff_last), na.rm = TRUE) / 12,
+    prelowcimapmins = sum(lowcimap * (wftime < cpb1on), na.rm = TRUE) / 12,
+    postlowcimapmins = sum(lowcimap * (wftime > cpboff_last), na.rm = TRUE) / 12,
+    prelowcihighcvpmins = sum(lowcihighcvp * (wftime < cpb1on), na.rm = TRUE) / 12,
+    postlowcihighcvpmins = sum(lowcihighcvp * (wftime > cpboff_last), na.rm = TRUE) / 12, 
+    highcvpmins= sum(highcvp,na.rm = TRUE)  / 12,
+    prehighcvpmins= sum((highcvp) * (wftime < cpb1on), na.rm = TRUE) / 12,
+    posthighcvpmins= sum((highcvp) * (wftime > cpboff_last), na.rm = TRUE) / 12,
+    intrahighcvpmins= sum((highcvp) * (wftime < cpboff_last & wftime>cpb1on), na.rm = TRUE) / 12,
+    preintra_highcvpmins= sum((highcvp) * (wftime <= cpboff_last), na.rm = TRUE) / 12,
+    lowmapmins= sum(lowmap,na.rm = TRUE)  / 12,
+    prelowmapmins= sum((lowmap) * (wftime < cpb1on), na.rm = TRUE) / 12,
+    postlowmapmins= sum((lowmap) * (wftime > cpboff_last), na.rm = TRUE) / 12,
+    intralowmapmins= sum((lowmap) * (wftime < cpboff_last & wftime>cpb1on), na.rm = TRUE) / 12,
+    preintra_lowmapmins= sum((lowmap) * (wftime <= cpboff_last), na.rm = TRUE) / 12,
+    redmins= sum(state=="R", na.rm = TRUE)  / 12,
+    red5mins= sum(state=="R", na.rm = TRUE)  / 60,
+    preredmins= sum((state=="R") * (wftime < cpb1on), na.rm = TRUE) / 12,
+    postredmins= sum((state=="R") * (wftime > cpboff_last), na.rm = TRUE) / 12,
+    intraredmins= sum((state=="R") * (wftime < cpboff_last & wftime>cpb1on), na.rm = TRUE) / 12,
+    preintra_redmins= sum((state=="R") * (wftime <= cpboff_last), na.rm = TRUE) / 12,
+    preintra_red5mins= sum((state=="R") * (wftime <= cpboff_last), na.rm = TRUE) / 60,
+    bluemins= sum(state=="B", na.rm = TRUE)  / 12,
+    prebluemins= sum((state=="B") * (wftime < cpb1on), na.rm = TRUE) / 12,
+    postbluemins= sum((state=="B") * (wftime > cpboff_last), na.rm = TRUE) / 12,
+    intrabluemins= sum((state=="B") * (wftime < cpboff_last & wftime>cpb1on), na.rm = TRUE) / 12,
+    preintra_bluemins= sum((state=="B") * (wftime <= cpboff_last), na.rm = TRUE) / 12,
+    whitemins= sum(state=="W", na.rm = TRUE)  / 12,
+    prewhitemins= sum((state=="W") * (wftime < cpb1on), na.rm = TRUE) / 12,
+    postwhitemins= sum((state=="W") * (wftime > cpboff_last), na.rm = TRUE) / 12,
+    intrawhitemins= sum((state=="W") * (wftime < cpboff_last & wftime>cpb1on), na.rm = TRUE) / 12,
+    preintra_whitemins= sum((state=="W") * (wftime <= cpboff_last), na.rm = TRUE) / 12, zone5mins= sum(zone5=="zone5", na.rm = TRUE)  / 12,
+    prezone5mins= sum((zone5=="zone5") * (wftime < cpb1on), na.rm = TRUE) / 12,
+    postzone5mins= sum((zone5=="zone5") * (wftime > cpboff_last), na.rm = TRUE) / 12,
+    intrazone5mins= sum((zone5=="zone5") * (wftime < cpboff_last & wftime>cpb1on), na.rm = TRUE) / 12,
+    white5mins=sum(state=="W", na.rm = TRUE)  / 60,
+    blue5mins=sum(state=="B", na.rm = TRUE)  / 60,
+    MAPless65_5mins=sum(MAP < 65, na.rm = TRUE)/60
+    ) %>%
+  arrange(harbor_id)
+
+biowide=datasum %>% left_join(biowide, by="harbor_id")
+
+
+biomarkers <- biomarkers %>%
+  mutate(timepoint = recode(timepoint, 
+                           `0` = "Baseline", 
+                           `0.5` = "PreCPB", 
+                           `1` = "OffCPB", 
+                           `2` = "ICU", 
+                           `3` = "24hICU"))
+
+biowide= biowide %>% left_join(covariates,by="harbor_id")
+
+biowide$AKI_48=as.factor(ifelse(biowide$AKI_48=="YES",1,0))
+
+biomarkers=biomarkers %>% left_join(biowide%>%select(harbor_id,AKI_48,cpbtime,proctime),by="harbor_id")
+
+
+
+
+timestamp$anesthesia.start.time <- strptime(timestamp$anesthesia.start.time, format = "%H:%M")
+timestamp$Timestamp.0_baseline <- strptime(timestamp$Timestamp.0_baseline, format = "%H:%M")
+timestamp$Timestamp.1_offCPB<- strptime(timestamp$Timestamp.1_offCPB, format = "%H:%M")
+timestamp$Timestamp.2_ICUarrival <- strptime(timestamp$Timestamp.2_ICUarrival, format = "%H:%M")
+timestamp$Timestamp.3_ICUnextday <- as.POSIXct(strptime(timestamp$Timestamp.3_ICUnextday, format = "%H:%M"))+86400
+
+
+
+timestamp$Timestamp.0_baseline <- as.numeric(difftime(timestamp$Timestamp.0_baseline, timestamp$Timestamp.1_offCPB, units = "mins"))
+timestamp$Timestamp.2_ICUarrival <- as.numeric(difftime(timestamp$Timestamp.2_ICUarrival, timestamp$Timestamp.1_offCPB, units = "mins"))
+timestamp$Timestamp.3_ICUnextday <- as.numeric(difftime(timestamp$Timestamp.3_ICUnextday, timestamp$Timestamp.1_offCPB, units = "mins"))
+timestamp$Timestamp.1_offCPB <- as.numeric(difftime(timestamp$Timestamp.1_offCPB, timestamp$Timestamp.1_offCPB, units = "mins"))
+
+
+colnames(timestamp)=c("harbor_id","anes_start","Baseline","OffCPB","ICU","24hICU")
+
+biowide$log2NGAL_UCR_2_1_avg= (biowide$log2NGAL_UCR_2+biowide$log2NGAL_UCR_1)/2
+biowide$log2YKL_UCR_2_1_avg=(biowide$log2NGAL_UCR_2+biowide$log2NGAL_UCR_1)/2
+
+rm(akidata,datasets,ortimes,df_clean,datasum)
+
+hemodynamics=hemodynamics %>% mutate(cat_cpb=ifelse(wftime<cpb1on,"pre",ifelse(wftime>cpboff_last,"post","intra")))
+hemodynamics$cat_cpb= factor(hemodynamics$cat_cpb,levels=c("pre","intra","post"))
+
+hemodynamics= hemodynamics %>% left_join(biowide %>% select(AKI_48,X48hrs_delCr,redmins, harbor_id,proctime),by="harbor_id")
+```
+
+
+
+## Patient exclusion 
+
+```{r,echo=FALSE}
+# PATIENT EXCLUSION 
+
+ids= covariates$harbor_id
+# Subset data 
+remove_ids=c("3","86","10","32","50","60","69")
+biomarkers= biomarkers %>% filter(!harbor_id %in% remove_ids) %>% filter(harbor_id %in% ids)
+biowide= biowide %>% filter(!harbor_id %in% remove_ids)%>% filter(harbor_id %in% ids)
+hemodynamics= hemodynamics %>% filter(!harbor_id %in% remove_ids)%>% filter(harbor_id %in% ids)
+rm(covariates,end_time_posix,g,ids,remove_ids,start_time_posix,time_diff)
+
+
+
+
+# Exclusion diagram 
+
+g=add_box(txt="HARBOR-AKI Population (n=128)")|>
+  add_side_box(txt="Excluded (n=2):\n\u2022 >1 Aortic cross-clamp")|>
+  add_box(txt="Patients (n=126)")|>
+  add_side_box(txt="Excluded (n=4):\n\u2022 Missing urinary biomarkers")|>
+  add_box(txt="Patients (n=122)")|>
+  add_side_box(txt="Excluded (n=1):\n\u2022 Intra-Aortic Balloon Pump")|>
+  add_box(txt="Patients (n=121)")
+plot(g)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Covariates/ Zone Exposures 
+
+```{r,echo=FALSE}
+covs=biowide %>% dplyr::select(patientage,gender,bmi,rfhypertension,rfdiabetes,priormi,hemodataef,rfpriorcva ,rfchroniclungdisease,medsbetablockerswithin24hours, rfhemoglobin,rflastcreatlevel,proctime,cpbtime,packed_rbc,predmort, predrenf, heartfailure)
+
+covs %>% tbl_summary(statistic=all_continuous()~"{mean} ({sd})", missing_text = "Missing")
+
+
+
+covs=biowide %>% dplyr::select(AKI_48,patientage,gender,bmi,rfhypertension,rfdiabetes,priormi,hemodataef,rfpriorcva ,rfchroniclungdisease,medsbetablockerswithin24hours, rfhemoglobin,rflastcreatlevel,proctime,cpbtime,packed_rbc, predmort, predrenf, heartfailure)
+
+covs %>% tbl_summary(by=AKI_48,statistic=all_continuous()~"{mean} ({sd})", missing_text = "Missing")
+
+rm(covs)
+```
+
+
+Total Surgery Minutes in Red Zone, Tertiles
+
+```{r,echo=FALSE}
+quantile(biowide$redmins, probs = c(0, 1/3, 2/3, 1))
+
+biowide$redzonetertile <- cut(biowide$redmins,
+                  breaks = quantile(biowide$redmins, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE),
+                  include.lowest = TRUE,
+                  labels = c("<77", "77-128", ">128"))
+
+covs=biowide %>% dplyr::select(redzonetertile,patientage,gender,bmi,rfhypertension,rfdiabetes,priormi,hemodataef,rfpriorcva ,rfchroniclungdisease,medsbetablockerswithin24hours, rfhemoglobin,rflastcreatlevel,proctime,cpbtime,heartfailure)
+
+covs %>% tbl_summary(by=redzonetertile,statistic=all_continuous()~"{mean} ({sd})", missing_text = "Missing")
+
+```
+
+
+Mean (SD) of total minutes spent in each zone exposure
+```{r,echo=FALSE}
+hemodynamics %>%
+  group_by(harbor_id, state) %>%
+  summarise(count = n()/12, .groups = "drop") %>%
+  pivot_wider(names_from = state, values_from = count, values_fill = 0)%>%
+  summarise(across(c(B,W,R), list(mean = mean, sd = sd)))
+```
+
+
+### Summary of Missingness Table 
+
+```{r,echo=FALSE}
+missing_table=hemodynamics %>% group_by(harbor_id, cat_cpb) %>%
+  summarise(total=n()/12,
+            missing_map=sum(is.na(MAP))/12,
+            missing_cvp=sum(is.na(CVP))/12) %>% ungroup()
+missing_table= missing_table %>%
+  mutate(missing_map_perc=missing_map/total*100,
+         missing_cvp_perc=missing_cvp/total*100)
+
+missing_table %>%
+  select(cat_cpb,total, missing_map, missing_cvp, missing_map_perc, missing_cvp_perc) %>%
+  tbl_summary(by= cat_cpb,         
+    statistic = list(all_continuous() ~ "{mean} ({sd})"))
+```
+
+
+
+
+
+```{r}
+summary_state = hemodynamics %>%
+  count(harbor_id, state, AKI_48) %>%                      
+  pivot_wider(names_from = state,                 
+              values_from = n, 
+              values_fill = 0)
+summary_state <- summary_state %>%
+  group_by(harbor_id) %>%
+  mutate(harbor_id = cur_group_id()) %>%
+  ungroup() %>%
+  mutate(AKI_48=ifelse(AKI_48==1, "Yes", "No")) %>%
+  rename(AKI=AKI_48)
+
+write.csv(summary_state, "summary_state.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+## Change in biomarkers during surgery {.tabset}
+
+### NGAL
+
+```{r,echo=FALSE}
+biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2NGAL_UCR)) +
+  geom_boxplot() +
+  stat_summary(fun.data=function(x) data.frame(y=8,label=paste0("n=",length(x))),geom="text",vjust=-0.5)+ylab("log2(NGAL/UCR)")+xlab("Timepoint")
+```
+
+
+
+Paired t-test between baseline and other timepoints:
+```{r,echo=FALSE}
+t_test_results <- tibble(
+  timepoint = c("PreCPB", "OffCPB", "ICU", "24hICU"),
+  p_value = c(
+    t.test(biowide$log2NGAL_UCR_0, biowide$log2NGAL_UCR_0.5, paired = TRUE)$p.value,
+    t.test(biowide$log2NGAL_UCR_0, biowide$log2NGAL_UCR_1, paired = TRUE)$p.value,
+    t.test(biowide$log2NGAL_UCR_0, biowide$log2NGAL_UCR_2, paired = TRUE)$p.value,
+    t.test(biowide$log2NGAL_UCR_0, biowide$log2NGAL_UCR_3, paired = TRUE)$p.value
+  ),
+  t_statistic = c(
+    t.test(biowide$log2NGAL_UCR_0, biowide$log2NGAL_UCR_0.5, paired = TRUE)$statistic,
+    t.test(biowide$log2NGAL_UCR_0, biowide$log2NGAL_UCR_1, paired = TRUE)$statistic,
+    t.test(biowide$log2NGAL_UCR_0, biowide$log2NGAL_UCR_2, paired = TRUE)$statistic,
+    t.test(biowide$log2NGAL_UCR_0, biowide$log2NGAL_UCR_3, paired = TRUE)$statistic
+  )
+)
+
+print(t_test_results %>% mutate(
+    p_value = round(p_value, 4),
+    t_statistic = round(t_statistic, 4)))
+```
+
+
+
+```{r,echo=FALSE}
+
+
+pval_df=data.frame(
+  timepoint= c("PreCPB", "OffCPB", "ICU", "24hICU"), 
+  label=c("p=0.022","p<0.000","p<0.000","p<0.000"),
+  y_pos=rep(8.5,4)
+)
+
+
+p=biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2NGAL_UCR)) +
+  geom_boxplot() +
+  stat_summary(fun.data=function(x) data.frame(y=9,label=paste0("n=",length(x))),geom="text",vjust=-0.5)+ylab("log2(NGAL/UCR)")+xlab("Timepoint")+
+  geom_text(data = pval_df, aes(x = timepoint, y = y_pos, label = label), inherit.aes = FALSE)
+p
+```
+
+```{r,echo=FALSE}
+biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2NGAL_UCR)) +
+  geom_boxplot() +
+  stat_summary(fun.data=function(x) data.frame(y=8.5,label=paste0("n=",length(x))),geom="text",vjust=-0.5)+ylab("log2(NGAL/UCR)")+xlab("Timepoint")+
+  scale_x_discrete(labels = c(
+    "Baseline" = "Baseline",
+    "PreCPB" = "PreCPB*",
+    "OffCPB" = "OffCPB*",
+    "ICU" = "ICU*",
+    "24hICU" = "24hICU*"
+  ))
+
+```
+
+
+
+```{r,echo=FALSE}
+biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2NGAL_UCR, col = AKI_48)) +
+  geom_boxplot(position = position_dodge(width = 0.75)) +
+  stat_summary(
+    aes(group = AKI_48), 
+    fun.data = function(x) data.frame(y = 8 + 0.2, label = paste0("n=", length(x))),
+    geom = "text",
+    position = position_dodge(width = 0.8),
+    vjust = 0
+  )
+
+```
+
+Wilcoxon rank sum test at 24hICU between AKI and nonAKI (not significant at OffCPB and ICU):
+```{r,echo=FALSE}
+wilcox.test(log2NGAL_UCR ~ AKI_48, data = biomarkers%>% filter(timepoint=="24hICU"))
+```
+
+
+```{r,echo=FALSE}
+biowide %>% pivot_longer(cols=c(log2NGAL_UCR_0.5_0,log2NGAL_UCR_1_0,log2NGAL_UCR_2_0,log2NGAL_UCR_3_0),names_to="time",values_to="log2NGAL_UCR")%>% mutate(time = fct_recode(time,
+                            "PreCPB-Baseline" = "log2NGAL_UCR_0.5_0",
+                            "OffCPB-Baseline" = "log2NGAL_UCR_1_0",
+                            "ICU-Baseline" = "log2NGAL_UCR_2_0",
+                            "24hICU-Baseline" = "log2NGAL_UCR_3_0")) %>% ggplot(aes(x=time, y=log2NGAL_UCR))+geom_boxplot()+geom_hline(yintercept=0)
+```
+
+
+
+```{r,echo=FALSE}
+biowide %>% pivot_longer(cols=c(log2NGAL_UCR_0.5_0,log2NGAL_UCR_1_0.5,log2NGAL_UCR_2_1,log2NGAL_UCR_3_2),names_to="time",values_to="log2NGAL_UCR")%>% mutate(time = fct_recode(time,
+                            "PreCPB-Baseline" = "log2NGAL_UCR_0.5_0",
+                            "OffCPB-PreCPB" = "log2NGAL_UCR_1_0.5",
+                            "ICU-OffCPB" = "log2NGAL_UCR_2_1",
+                            "24hICU-ICU" = "log2NGAL_UCR_3_2")) %>% ggplot(aes(x=time, y=log2NGAL_UCR))+geom_boxplot()+geom_hline(yintercept=0)
+```
+
+
+
+### YKL
+```{r,echo=FALSE}
+biomarkers %>%drop_na(AKI_48) %>%ggplot(aes(x=timepoint,y=log2YKL_UCR))+geom_boxplot()+
+  stat_summary(fun.data=function(x) data.frame(y=6,label=paste0("n=",length(x))),geom="text",vjust=-0.5)+ylab("log2(YKL/UCR)")+xlab("Timepoint")
+```
+
+
+Paired t-test between baseline and other timepoints:
+```{r,echo=FALSE}
+t_test_results <- tibble(
+  timepoint = c("PreCPB", "OffCPB", "ICU", "24hICU"),
+  p_value = c(
+    t.test(biowide$log2YKL_UCR_0, biowide$log2YKL_UCR_0.5, paired = TRUE)$p.value,
+    t.test(biowide$log2YKL_UCR_0, biowide$log2YKL_UCR_1, paired = TRUE)$p.value,
+    t.test(biowide$log2YKL_UCR_0, biowide$log2YKL_UCR_2, paired = TRUE)$p.value,
+    t.test(biowide$log2YKL_UCR_0, biowide$log2YKL_UCR_3, paired = TRUE)$p.value
+  ),
+  t_statistic = c(
+    t.test(biowide$log2YKL_UCR_0, biowide$log2YKL_UCR_0.5, paired = TRUE)$statistic,
+    t.test(biowide$log2YKL_UCR_0, biowide$log2YKL_UCR_1, paired = TRUE)$statistic,
+    t.test(biowide$log2YKL_UCR_0, biowide$log2YKL_UCR_2, paired = TRUE)$statistic,
+    t.test(biowide$log2YKL_UCR_0, biowide$log2YKL_UCR_3, paired = TRUE)$statistic
+  )
+)
+
+print(t_test_results %>% mutate(
+    p_value = round(p_value, 4),
+    t_statistic = round(t_statistic, 4)))
+```
+
+
+
+```{r,echo=FALSE}
+
+
+pval_df=data.frame(
+  timepoint= c("PreCPB", "OffCPB", "ICU", "24hICU"), 
+  label=c("p=0.0019","p<0.000","p<0.000","p<0.000"),
+  y_pos=rep(5.5,4)
+)
+
+p=biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2YKL_UCR)) +
+  geom_boxplot() +
+  stat_summary(fun.data=function(x) data.frame(y=6,label=paste0("n=",length(x))),geom="text",vjust=-0.5)+ylab("log2(YKL/UCR)")+xlab("Timepoint")+
+  geom_text(data = pval_df, aes(x = timepoint, y = y_pos, label = label), inherit.aes = FALSE)
+p
+```
+
+
+
+```{r,echo=FALSE}
+
+biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2YKL_UCR)) +
+  geom_boxplot() +
+  stat_summary(fun.data=function(x) data.frame(y=6,label=paste0("n=",length(x))),geom="text",vjust=-0.5)+ylab("log2(YKL/UCR)")+xlab("Timepoint")+
+  scale_x_discrete(labels = c(
+    "Baseline" = "Baseline",
+    "PreCPB" = "PreCPB*",
+    "OffCPB" = "OffCPB*",
+    "ICU" = "ICU*",
+    "24hICU" = "24hICU*"
+  ))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r,echo=FALSE}
+biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2YKL_UCR, col = AKI_48)) +
+  geom_boxplot(position = position_dodge(width = 0.75)) +
+  stat_summary(
+    aes(group = AKI_48),  
+    fun.data = function(x) data.frame(y = 8 + 0.2, label = paste0("n=", length(x))),
+    geom = "text",
+    position = position_dodge(width = 0.8),
+    vjust = 0
+  )
+```
+
+
+Wilcoxon rank sum test at 24hICU between AKI and nonAKI (not significant at OffCPB and ICU):
+```{r,echo=FALSE}
+wilcox.test(log2YKL_UCR ~ AKI_48, data = biomarkers%>% filter(timepoint=="24hICU"))
+```
+
+```{r,echo=FALSE}
+biowide %>%
+  pivot_longer(
+    cols = c(log2YKL_UCR_0.5_0, log2YKL_UCR_1_0, log2YKL_UCR_2_0, log2YKL_UCR_3_0),
+    names_to = "time",
+    values_to = "log2YKL_UCR"
+  ) %>%
+  mutate(time = fct_recode(
+    time,
+    "PreCPB-Baseline" = "log2YKL_UCR_0.5_0",
+    "OffCPB-Baseline" = "log2YKL_UCR_1_0",
+    "ICU-Baseline" = "log2YKL_UCR_2_0",
+    "24hICU-Baseline" = "log2YKL_UCR_3_0"
+  )) %>%
+  ggplot(aes(x = time, y = log2YKL_UCR)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0)
+```
+
+```{r,echo=FALSE}
+biowide %>%
+  pivot_longer(
+    cols = c(log2YKL_UCR_0.5_0, log2YKL_UCR_1_0.5, log2YKL_UCR_2_1, log2YKL_UCR_3_2),
+    names_to = "time",
+    values_to = "log2YKL_UCR"
+  ) %>%
+  mutate(time = fct_recode(
+    time,
+    "PreCPB-Baseline" = "log2YKL_UCR_0.5_0",
+    "OffCPB-PreCPB" = "log2YKL_UCR_1_0.5",
+    "ICU-OffCPB" = "log2YKL_UCR_2_1",
+    "24hICU-ICU" = "log2YKL_UCR_3_2"
+  )) %>%
+  ggplot(aes(x = time, y = log2YKL_UCR)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0)
+```
+
+
+
+### Nephrocheck 
+
+```{r,echo=FALSE}
+biomarkers %>%drop_na(AKI_48) %>%ggplot(aes(x=timepoint,y=log2akiscore))+geom_boxplot()+stat_summary(fun.data=function(x) data.frame(y=2.2,label=paste0("n=",length(x))),geom="text",vjust=-0.5)+ylab("log2(nephrocheck)")+xlab("Timepoint")
+```
+
+
+
+Paired t-test between baseline and other timepoints:
+```{r,echo=FALSE}
+t_test_results <- tibble(
+  timepoint = c("OffCPB", "ICU", "24hICU"),
+  p_value = c(
+    t.test(biowide$log2akiscore_0, biowide$log2akiscore_1, paired = TRUE)$p.value,
+    t.test(biowide$log2akiscore_0, biowide$log2akiscore_2, paired = TRUE)$p.value,
+    t.test(biowide$log2akiscore_0, biowide$log2akiscore_3, paired = TRUE)$p.value
+  ),
+  t_statistic = c(
+    t.test(biowide$log2akiscore_0, biowide$log2akiscore_1, paired = TRUE)$statistic,
+    t.test(biowide$log2akiscore_0, biowide$log2akiscore_2, paired = TRUE)$statistic,
+    t.test(biowide$log2akiscore_0, biowide$log2akiscore_3, paired = TRUE)$statistic
+  )
+)
+
+print(t_test_results %>% mutate(
+    p_value = round(p_value, 4),
+    t_statistic = round(t_statistic, 4)))
+```
+
+```{r,echo=FALSE}
+
+
+pval_df=data.frame(
+  timepoint= c("OffCPB", "ICU", "24hICU"), 
+  label=c("p<0.000","p<0.000","p<0.000"),
+  y_pos=rep(2.2,3)
+)
+
+
+p=biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2akiscore)) +
+  geom_boxplot() +
+  stat_summary(fun.data=function(x) data.frame(y=2.4,label=paste0("n=",length(x))),geom="text",vjust=-0.5)+ylab("log2(nephrocheck)")+xlab("Timepoint")+
+  geom_text(data = pval_df, aes(x = timepoint, y = y_pos, label = label), inherit.aes = FALSE)
+p
+```
+
+
+
+
+
+```{r,echo=FALSE}
+
+biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2akiscore)) +
+  geom_boxplot() +
+  stat_summary(fun.data=function(x) data.frame(y=2.4,label=paste0("n=",length(x))),geom="text",vjust=-0.5)+ylab("log2(nephrocheck)")+xlab("Timepoint")+
+  scale_x_discrete(labels = c(
+    "Baseline" = "Baseline",
+    "PreCPB" = "PreCPB",
+    "OffCPB" = "OffCPB*",
+    "ICU" = "ICU*",
+    "24hICU" = "24hICU*"
+  ))
+```
+
+
+
+
+
+
+```{r,echo=FALSE}
+biomarkers %>%
+  drop_na(AKI_48) %>%
+  ggplot(aes(x = timepoint, y = log2akiscore, col = AKI_48)) +
+  geom_boxplot(position = position_dodge(width = 0.75)) +
+  stat_summary(
+    aes(group = AKI_48),  
+    fun.data = function(x) data.frame(y = 8 + 0.2, label = paste0("n=", length(x))),
+    geom = "text",
+    position = position_dodge(width = 0.8),
+    vjust = 0
+  )
+```
+
+
+```{r,echo=FALSE}
+biowide %>%
+  pivot_longer(
+    cols = c(log2akiscore_1_0, log2akiscore_2_0, log2akiscore_3_0),
+    names_to = "time",
+    values_to = "log2akiscore"
+  ) %>%
+  mutate(time = fct_recode(
+    time,
+    "OffCPB-Baseline" = "log2akiscore_1_0",
+    "ICU-Baseline" = "log2akiscore_2_0",
+    "24hICU-Baseline" = "log2akiscore_3_0"
+  )) %>%
+  ggplot(aes(x = time, y = log2akiscore)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0)+
+  ylab("log2(nephrocheck)")
+```
+
+
+```{r,echo=FALSE}
+biowide %>%
+  pivot_longer(
+    cols = c(log2akiscore_0.5_0, log2akiscore_1_0.5, log2akiscore_2_1, log2akiscore_3_2),
+    names_to = "time",
+    values_to = "log2akiscore"
+  ) %>%
+  mutate(time = fct_recode(
+    time,
+    "PreCPB-Baseline" = "log2akiscore_0.5_0",
+    "OffCPB-PreCPB" = "log2akiscore_1_0.5",
+    "ICU-OffCPB" = "log2akiscore_2_1",
+    "24hICU-ICU" = "log2akiscore_3_2"
+  )) %>%
+  ggplot(aes(x = time, y = log2akiscore)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0)
+```
+
+
+
+## Line/Boxplots biomarkers raw and log over timepoints
+
+
+```{r,echo=FALSE}
+biomarkers %>% ggplot(aes(x=timepoint,y=NGAL_UCR))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    labs(x = "Timepoint", y = "NGAL/UCR") 
+
+biomarkers %>% ggplot(aes(x=timepoint,y=NGAL_UCR))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 1, width = 0.4, outlier.size = 1.5,fill="white")+
+    labs(x = "Timepoint", y = "NGAL/UCR") 
+
+biomarkers %>% ggplot(aes(x=timepoint,y=log2NGAL_UCR))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 1, width = 0.4, outlier.size = 1.5,fill="white")+
+    labs(x = "Timepoint", y = "log2(NGAL/UCR)") 
+
+biomarkers %>% ggplot(aes(x=timepoint,y=log2NGAL_UCR))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 0.5, width = 0.4, outlier.size = 1.5)+
+    labs(x = "Timepoint", y = "log2(NGAL/UCR)") 
+
+
+
+
+
+biomarkers %>% ggplot(aes(x=timepoint,y=YKL_UCR))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    labs(x = "Timepoint", y = "YKL/UCR") 
+
+biomarkers %>% ggplot(aes(x=timepoint,y=YKL_UCR))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 1, width = 0.4, outlier.size = 1.5,fill="white")+
+    labs(x = "Timepoint", y = "YKL/UCR") 
+
+biomarkers %>% ggplot(aes(x=timepoint,y=log2YKL_UCR))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 1, width = 0.4, outlier.size = 1.5,fill="white")+
+    labs(x = "Timepoint", y = "log2(YKL/UCR)") 
+
+biomarkers %>% ggplot(aes(x=timepoint,y=log2YKL_UCR))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 0.5, width = 0.4, outlier.size = 1.5)+
+    labs(x = "Timepoint", y = "log2(YKL/UCR)") 
+
+
+
+
+
+
+
+biomarkers %>% ggplot(aes(x=timepoint,y=akiscore))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    labs(x = "Timepoint", y = "Nephrocheck") 
+
+biomarkers %>% ggplot(aes(x=timepoint,y=akiscore))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 1, width = 0.4, outlier.size = 1.5,fill="white")+
+    labs(x = "Timepoint", y = "Nephrocheck") 
+
+biomarkers %>% ggplot(aes(x=timepoint,y=log2akiscore))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 1, width = 0.4, outlier.size = 1.5,fill="white")+
+    labs(x = "Timepoint", y = "log2(Nephrocheck)") 
+
+biomarkers %>% ggplot(aes(x=timepoint,y=log2akiscore))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 0.5, width = 0.4, outlier.size = 1.5)+
+    labs(x = "Timepoint", y = "log2(Nephrocheck)") 
+```
+
+
+
+
+
+```{r,echo=FALSE}
+
+biomarkers %>% filter(timepoint !="PreCPB") %>% ggplot(aes(x=timepoint,y=akiscore))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 0.5, width = 0.4, outlier.size = 1.5,fill="white")+
+    labs(x = "Timepoint", y = "TIMP2•IGFBP7 (ng/mL × ng/mL)") + scale_x_discrete(labels = c("Baseline" = "Baseline", "PreCPB" = "PreCPB", "OffCPB" = "PostCPB", "ICU"="ICU Arrival", "24hICU"="24 Hours After ICU Arrival"))
+
+biomarkers %>% filter(timepoint !="PreCPB") %>% ggplot(aes(x=timepoint,y=log2NGAL_UCR))+
+    geom_line(aes(group=harbor_id),alpha = 0.3, color = "black") + 
+    geom_boxplot(alpha = 0.5, width = 0.4, outlier.size = 1.5)+
+    labs(x = "Timepoint", y = "log2(NGAL/UCR (ng/mg))")+ scale_x_discrete(labels = c("Baseline" = "Baseline", "PreCPB" = "PreCPB", "OffCPB" = "PostCPB", "ICU"="ICU Arrival", "24hICU"="24 Hours After ICU Arrival"))
+```
+
+
+
+
+
+
+
+## OffCPB and ICU timepoints similar 
+
+```{r,echo=FALSE}
+
+cor_value = cor(biowide$log2NGAL_UCR_1, biowide$log2NGAL_UCR_2)
+cor_value_no_aki= cor(biowide$log2NGAL_UCR_1[biowide$AKI_48 == 0],
+                  biowide$log2NGAL_UCR_2[biowide$AKI_48 == 0],
+                  use = "complete.obs")
+cor_value_aki= cor(biowide$log2NGAL_UCR_1[biowide$AKI_48 == 1],
+                  biowide$log2NGAL_UCR_2[biowide$AKI_48 == 1],
+                  use = "complete.obs")
+
+# Create scatter plot and display correlation
+biowide %>% ggplot(aes(x=log2NGAL_UCR_1,y=log2NGAL_UCR_2)) +
+  geom_point() +
+  annotate("text", x = -5, y = 6, 
+           label = paste("r =", round(cor_value, 3),"\n",
+                         "nonAKI r =", round(cor_value_no_aki, 3),"\n",
+                         "AKI r =", round(cor_value_aki, 3)), hjust = 0, size = 5, color = "black") +
+  xlab("log2NGAL_UCR OffCPB")+
+  ylab("log2NGAL_UCR ICU")+geom_abline(intercept=0,slope=1)
+
+cor_value = cor(biowide$log2YKL_UCR_1, biowide$log2YKL_UCR_2,use = "complete.obs")
+cor_value_no_aki = cor(biowide$log2YKL_UCR_1[biowide$AKI_48 == 0],
+                       biowide$log2YKL_UCR_2[biowide$AKI_48 == 0],
+                       use = "complete.obs")
+cor_value_aki = cor(biowide$log2YKL_UCR_1[biowide$AKI_48 == 1],
+                    biowide$log2YKL_UCR_2[biowide$AKI_48 == 1],
+                    use = "complete.obs")
+
+# Create scatter plot with YKL data
+biowide %>% 
+  ggplot(aes(x = log2YKL_UCR_1, y = log2YKL_UCR_2)) +
+  geom_point() +
+  annotate("text", x = -7, y = 2, 
+           label = paste("r =", round(cor_value, 3), "\n",
+                         "nonAKI r =", round(cor_value_no_aki, 3), "\n",
+                         "AKI r =", round(cor_value_aki, 3)), 
+           hjust = 0, size = 5, color = "black") +
+  xlab("log2YKL_UCR OffCPB") +
+  ylab("log2YKL_UCR ICU") +
+  geom_abline(intercept = 0, slope = 1)
+
+
+```
+
+
+
+## Biomarkers relationship with cpbtime
+
+```{r,echo=FALSE}
+timestamp <- timestamp %>%
+  pivot_longer(
+    cols = c("Baseline","OffCPB","ICU","24hICU"),  # Select columns to pivot (e.g., var1, var2, var3)
+    names_to = "timepoint",      # New column name for variable names
+    values_to = "Minutes"         # New column name for values
+  )
+timestamp=timestamp %>% left_join(biomarkers %>% select(harbor_id,timepoint,NGAL,NGAL_UCR,log2NGAL,log2NGAL_UCR,
+                                                        YKL,YKL_UCR,log2YKL,log2YKL_UCR,AKI_48,cpbtime),by=c("harbor_id","timepoint"))
+
+timestamp <- timestamp %>%
+  mutate(Minutes = if_else(harbor_id == "86" & timepoint == "ICU", 118, Minutes))
+timestamp %>% drop_na(AKI_48)%>%ggplot(aes(x=Minutes,y=log2NGAL_UCR,group=harbor_id))+geom_point()+geom_line(aes(col=cpbtime))+
+  scale_color_gradient(low = "yellow", high = "darkblue") 
+
+
+cor_value <- cor(biowide$log2NGAL_UCR_1, biowide$cpbtime)
+biomarkers %>% filter(timepoint=="OffCPB") %>%ggplot(aes(y=log2NGAL_UCR,x=cpbtime, col=timepoint))+geom_point()+
+  annotate("text", y = 6, x = 50, 
+           label = paste("r =", round(cor_value, 2)), hjust = 0, size = 5, color = "black") 
+
+
+cor_value <- cor(biowide$log2NGAL_UCR_2, biowide$cpbtime)
+biomarkers %>% filter(timepoint=="ICU") %>%ggplot(aes(y=log2NGAL_UCR,x=cpbtime, col=timepoint))+geom_point()+
+  annotate("text", y = 6, x = 50, 
+           label = paste("r =", round(cor_value, 2)), hjust = 0, size = 5, color = "black") 
+```
+
+```{r,echo=FALSE}
+timestamp %>% drop_na(AKI_48)%>%ggplot(aes(x=Minutes,y=log2YKL_UCR,group=harbor_id))+geom_point()+geom_line(aes(col=cpbtime))+
+  scale_color_gradient(low = "yellow", high = "darkblue") 
+
+cor_value <- cor(biowide$log2YKL_UCR_1, biowide$cpbtime)
+biomarkers %>% filter(timepoint=="OffCPB") %>%ggplot(aes(y=log2YKL_UCR,x=cpbtime, col=timepoint))+geom_point()+
+  annotate("text", y = 6, x = 50, 
+           label = paste("r =", round(cor_value, 2)), hjust = 0, size = 5, color = "black") 
+
+
+cor_value <- cor(biowide$log2YKL_UCR_2, biowide$cpbtime)
+biomarkers %>% filter(timepoint=="ICU") %>%ggplot(aes(y=log2YKL_UCR,x=cpbtime, col=timepoint))+geom_point()+
+  annotate("text", y = 6, x = 50, 
+           label = paste("r =", round(cor_value, 2)), hjust = 0, size = 5, color = "black") 
+```
+
+
+
+
+```{r,echo=FALSE}
+biomarkers%>%filter(timepoint=="Baseline")%>% ggplot(aes(x=cpbtime,y=log2YKL_UCR))+geom_point()+ylab("Baseline log2YKL_UCR")
+```
+
+
+
+
+## Correlation of YKL and NGAL, especially at OffCPB and ICU
+
+
+```{r,echo=FALSE}
+biomarkers%>% ggplot(aes(x=log2NGAL_UCR,y=log2YKL_UCR,col=timepoint))+geom_point()
+```
+
+
+Baseline
+```{r,echo=FALSE}
+cor(biowide$log2NGAL_UCR_0, biowide$log2YKL_UCR_0, use = "complete.obs")
+```
+
+OffCPB
+```{r,echo=FALSE}
+cor(biowide$log2NGAL_UCR_1, biowide$log2YKL_UCR_1, use = "complete.obs")
+```
+
+Arrival ICU
+```{r,echo=FALSE}
+cor(biowide$log2NGAL_UCR_2, biowide$log2YKL_UCR_2, use = "complete.obs")
+```
+
+24hICU
+```{r,echo=FALSE}
+cor(biowide$log2NGAL_UCR_3, biowide$log2YKL_UCR_3, use = "complete.obs")
+```
+
+
+
+## NGAL categories
+
+```{r,echo=FALSE}
+biomarkers$NGALcat=  cut(biomarkers$NGAL, 
+                  breaks = c(-Inf, 50, 150, 1000, Inf), 
+                  labels = c("<50", "50-150", "150-1000", ">1000"), 
+                  right = FALSE)
+
+
+contingency_table <- xtabs(~timepoint  + NGALcat , data = biomarkers)
+contingency_table
+
+percentage_table <- prop.table(contingency_table,margin=1) * 100
+percentage_table
+
+
+ggplot(biomarkers %>%
+         count(timepoint, NGALcat) %>%
+         group_by(timepoint) %>%
+         mutate(pct = n / sum(n)), # Calculate percent within each timepoint
+       aes(x = timepoint, y = n, fill = factor(NGALcat, levels = c(">1000","150-1000", "50-150","<50")))) + 
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(sprintf("%1.1f", pct * 100), "%")), 
+            position = position_stack(vjust = 0.5)) +
+  ylab("Count")+labs(fill="NGAL")+
+  scale_fill_manual(values = c("<50" = "lightgreen",      
+                               "50-150" = "#66B3FF",   
+                               "150-1000" = "orange", 
+                               ">1000" = "#FF9999"))
+
+```
+
+
+
+
+Note: I dropped patients who had no 24HICU values so sample size for sankey diagram is 110 rather than 121
+
+```{r,echo=FALSE}
+
+nodes <- data.frame(name = c("<50", "50-150","150-1000", ">1000","<50", "50-150","150-1000", ">1000","<50", "50-150","150-1000", ">1000","<50", "50-150","150-1000"))
+
+
+df_wide <- biomarkers %>% select(harbor_id, timepoint, NGALcat) %>% filter(timepoint != "PreCPB") %>%
+  pivot_wider(names_from = timepoint, values_from = NGALcat)
+df_wide<- df_wide %>% rename("ICU24h" = "24hICU")
+df_wide= df_wide %>% drop_na()
+
+
+transition_table1 <- df_wide %>%
+       count(Baseline, OffCPB) %>%
+       arrange(desc(n)) %>%
+  mutate(source = recode(Baseline,
+                    "<50" = 0,
+                    "50-150" = 1,
+                    "150-1000" = 2,
+                    ">1000" = 3))%>%
+  mutate(target = recode(OffCPB,
+                         "<50" = 4,
+                         "50-150" =5,
+                         "150-1000" = 6,
+                         ">1000" = 7))%>%
+  rename(value = n)%>%
+  select(-Baseline, -OffCPB)
+
+
+transition_table2 <- df_wide %>%
+  count(OffCPB, ICU) %>%
+  arrange(desc(n)) %>%
+  mutate(source = recode(OffCPB,
+                         "<50" = 4,
+                         "50-150" =5,
+                         "150-1000" = 6,
+                         ">1000" = 7))%>%
+  mutate(target = recode(ICU,
+                         "<50" = 8,
+                         "50-150" =9,
+                         "150-1000" = 10,
+                         ">1000" = 11))%>%
+  rename(value = n)%>%
+  select(-ICU, -OffCPB)
+
+
+transition_table3 <- df_wide %>%
+  count(ICU, ICU24h) %>%
+  arrange(desc(n)) %>%
+  mutate(source = recode(ICU,
+                         "<50" = 8,
+                         "50-150" =9,
+                         "150-1000" = 10,
+                         ">1000" = 11))%>%
+  mutate(target = recode(ICU24h,
+                         "<50" = 12,
+                         "50-150" =13,
+                         "150-1000" = 14))%>%
+  rename(value = n)%>%
+  select(-ICU, -ICU24h)
+
+
+
+links=rbind(transition_table1, transition_table2,transition_table3)
+
+
+
+color_scale <- 
+  'd3.scaleOrdinal()
+    .domain(["<50",  "50-150", "150-1000", ">1000"])
+    .range(["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3"])'
+
+p=sankeyNetwork(Links = links, Nodes = nodes,
+              Source = "source", Target = "target",
+              Value = "value", NodeID = "name",
+              NodeGroup = "name",       # must match column in nodes
+              colourScale = color_scale, # D3 format
+              fontSize = 12, nodeWidth = 30)
+
+onRender(p, '
+function(el, x) {
+  const svg = d3.select(el).select("svg");
+  const nodeGroups = svg.selectAll(".node");
+
+  // Get unique x positions of columns
+  const xPositions = [];
+  nodeGroups.each(function() {
+    const xVal = +d3.select(this).attr("transform").match(/translate\\(([^,]+)/)[1];
+    if (!xPositions.includes(xVal)) xPositions.push(xVal);
+  });
+
+  // Sort x positions so labels go in order left to right
+  xPositions.sort((a, b) => a - b);
+
+  // Your labels (must match number of unique x positions!)
+  const labels = ["Baseline", "OffCPB", "ICU", "ICU24h"];
+  const yPos = 10;
+
+  xPositions.forEach(function(x, i) {
+    svg.append("text")
+       .attr("x", x + 30) // slight offset to center above node column
+       .attr("y", yPos)
+       .attr("text-anchor", "middle")
+       .style("font-size", "14px")
+       .style("font-weight", "bold")
+       .text(labels[i]);
+  });
+}
+')
+
+
+```
+
+
+
+
+
+```{r,echo=FALSE,include=FALSE}
+
+nodes <- data.frame(name = c(">1000","150-1000","50-150","<50",">1000","150-1000","50-150","<50",">1000","150-1000","50-150","<50","150-1000","50-150","<50"))
+
+
+df_wide <- biomarkers %>% select(harbor_id, timepoint, NGALcat) %>% filter(timepoint != "PreCPB") %>%
+  pivot_wider(names_from = timepoint, values_from = NGALcat)
+df_wide<- df_wide %>% rename("ICU24h" = "24hICU")
+df_wide= df_wide %>% drop_na()
+
+
+transition_table1 <- df_wide %>%
+       count(Baseline, OffCPB) %>%
+       arrange(desc(n)) %>%
+  mutate(source = recode(Baseline,
+                         ">1000" = 0,
+                         "150-1000" = 1,
+                         "50-150" = 2,
+                         "<50" = 3))%>%
+  mutate(target = recode(OffCPB,
+                         ">1000" = 4,
+                         "150-1000" = 5,
+                         "50-150" =6,
+                         "<50" = 7))%>%
+  rename(value = n)%>%
+  select(-Baseline, -OffCPB)
+
+
+transition_table2 <- df_wide %>%
+  count(OffCPB, ICU) %>%
+  arrange(desc(n)) %>%
+  mutate(source = recode(OffCPB,
+                         ">1000" = 4,
+                         "150-1000" = 5,
+                         "50-150" =6,
+                         "<50" = 7))%>%
+  mutate(target = recode(ICU,
+                         ">1000" = 8,
+                         "150-1000" = 9,
+                          "50-150" =10,
+                         "<50" = 11))%>%
+  rename(value = n)%>%
+  select(-ICU, -OffCPB)
+
+
+transition_table3 <- df_wide %>%
+  count(ICU, ICU24h) %>%
+  arrange(desc(n)) %>%
+  mutate(source = recode(ICU,
+                         ">1000" = 8,
+                         "150-1000" = 9,
+                          "50-150" =10,
+                         "<50" = 11))%>%
+  mutate(target = recode(ICU24h,
+                         "150-1000" = 12,
+                         "50-150" =13,
+                         "<50" = 14))%>%
+  rename(value = n)%>%
+  select(-ICU, -ICU24h)
+
+
+
+links=rbind(transition_table1, transition_table2,transition_table3)
+nodes$name <- factor(nodes$name, levels = c(">1000", "150-1000", "50-150","<50"))
+
+
+nodes <- data.frame(
+  name = c(">1000_T1", "150-1000_T1", "50-150_T1", "<50_T1",
+           ">1000_T2", "150-1000_T2", "50-150_T2", "<50_T2",
+           ">1000_T3", "150-1000_T3", "50-150_T3", "<50_T3",
+           "150-1000_T4", "50-150_T4", "<50_T4")
+
+)
+
+
+
+color_scale <- 
+  'd3.scaleOrdinal()
+    .domain(["<50",  "50-150", "150-1000", ">1000"])
+    .range(["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3"])'
+
+
+sankeyNetwork(Links = links, Nodes = nodes,
+              Source = "source", Target = "target",
+              Value = "value", NodeID = "name",
+              NodeGroup = "name",       # must match column in nodes
+              colourScale = color_scale, # D3 format
+              fontSize = 12, nodeWidth = 30)
+
+
+```
+
+
+
+```{r,echo=FALSE,include=FALSE}
+links = data.frame(
+  value = round(runif(18,0,50)),
+  source= rep(0:5,each=3),
+  target= c(rep(c(3:5),3), rep(c(6:8),3))
+)
+
+nodes=data.frame(
+  name=rep(c("Category 1","Category 2","Category 3"),3)
+)
+
+color_scale <- 
+  'd3.scaleOrdinal()
+    .domain(["<50",  "50-150", "150-1000", ">1000"])
+    .range(["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3"])'
+
+
+p=sankeyNetwork(Links = links, Nodes = nodes,
+              Source = "source", Target = "target",
+              Value = "value", NodeID = "name",
+              NodeGroup = "name",       # must match column in nodes
+              colourScale = color_scale, # D3 format
+              fontSize = 12, nodeWidth = 30)
+
+onRender(p, '
+function(el, x) {
+  // Rebuild Sankey with nodeSort null
+  var sankey = d3.sankey()
+    .nodeWidth(x.options.nodeWidth)
+    .nodePadding(x.options.nodePadding)
+    .extent([[1, 1], [x.options.width - 1, x.options.height - 5]])
+    .nodeSort(null);  // <-- prevent reordering
+
+  var graph = sankey({
+    nodes: x.nodes.map(d => Object.assign({}, d)),
+    links: x.links.map(d => Object.assign({}, d))
+  });
+
+  // Replace the graph with new layout
+  d3.select(el).select("svg").remove();
+  var svg = d3.select(el).append("svg")
+    .attr("width", x.options.width)
+    .attr("height", x.options.height);
+
+  // You can now re-render graph.nodes & graph.links as needed
+}
+')
+
+```
+
+
+
+
+
+
+
+```{r,echo=FALSE,include=FALSE, eval=FALSE}
+
+hm=df_wide %>% select(Baseline, OffCPB, ICU, ICU24h) %>%
+  count(Baseline, OffCPB, ICU, ICU24h)
+
+ggplot(data = hm,
+       aes(axis1 = Baseline, axis2 = OffCPB, axis3 = ICU, axis4=ICU24h,
+           y = n)) +
+  scale_x_discrete(limits = c("Class", "Sex", "Age"), expand = c(.2, .05)) +
+  xlab("Demographic") +
+  geom_alluvium(aes(fill = Baseline)) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  theme_minimal() +
+  ggtitle("passengers on the maiden voyage of the Titanic",
+          "stratified by demographics and survival")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Sankey Diagram of quartiles of NGAL_UCR calculated each time point 
+
+
+```{r,echo=FALSE}
+# Generate categories of quartiles for each timepoint 
+categorize_quartiles <- function(group) {
+  quantiles <- quantile(group$NGAL_UCR, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+  group$quartile <- cut(
+    group$NGAL_UCR,
+    breaks = quantiles,
+    include.lowest = TRUE,
+    labels = c("Q1", "Q2", "Q3", "Q4")
+  )
+  return(group)
+}
+
+biomarkers <- do.call(rbind, by(biomarkers, biomarkers$timepoint, categorize_quartiles))
+
+
+
+# Make data for sankey plot
+
+nodes <- data.frame(name = rep(c("Q1","Q2","Q3","Q4"),4),
+                    group =c("grp1", "grp2", "grp3", "grp4","grp1", "grp2", "grp3", "grp4","grp1", "grp2", "grp3", "grp4","grp1", "grp2", "grp3","grp4"))
+
+
+
+df_wide <- biomarkers %>% select(harbor_id, timepoint, quartile) %>% filter(timepoint != "PreCPB") %>%
+  pivot_wider(names_from = timepoint, values_from = quartile)
+df_wide<- df_wide %>% rename("ICU24h" = "24hICU")
+df_wide= df_wide %>% drop_na()
+
+
+transition_table1 <- df_wide %>%
+       count(Baseline, OffCPB) %>%
+       arrange(desc(n)) %>%
+  mutate(source = recode(Baseline,
+                    "Q1" = 0,
+                    "Q2" = 1,
+                    "Q3" = 2,
+                    "Q4" = 3))%>%
+  mutate(target = recode(OffCPB,
+                         "Q1" = 4,
+                         "Q2" =5,
+                         "Q3" = 6,
+                         "Q4" = 7))%>%
+  rename(value = n)%>%
+  select(-Baseline, -OffCPB)
+
+
+transition_table2 <- df_wide %>%
+  count(OffCPB, ICU) %>%
+  arrange(desc(n)) %>%
+  mutate(source = recode(OffCPB,
+                         "Q1" = 4,
+                         "Q2" =5,
+                         "Q3" = 6,
+                         "Q4" = 7))%>%
+  mutate(target = recode(ICU,
+                         "Q1" = 8,
+                         "Q2" =9,
+                         "Q3" = 10,
+                         "Q4" = 11))%>%
+  rename(value = n)%>%
+  select(-ICU, -OffCPB)
+
+
+transition_table3 <- df_wide %>%
+  count(ICU, ICU24h) %>%
+  arrange(desc(n)) %>%
+  mutate(source = recode(ICU,
+                         "Q1" = 8,
+                         "Q2" =9,
+                         "Q3" = 10,
+                         "Q4" = 11))%>%
+  mutate(target = recode(ICU24h,
+                         "Q1" = 12,
+                         "Q2" =13,
+                         "Q3" = 14,
+                         "Q4" = 15,))%>%
+  rename(value = n)%>%
+  select(-ICU, -ICU24h)
+
+
+
+links=rbind(transition_table1, transition_table2,transition_table3)
+
+
+
+color_scale <- 
+  'd3.scaleOrdinal()
+    .domain(["grp1",  "grp2", "grp3", "grp4"])
+    .range(["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3"])'
+
+p=sankeyNetwork(Links = links, Nodes = nodes,
+              Source = "source", Target = "target",
+              Value = "value", NodeID = "name",
+              NodeGroup = "group",       # must match column in nodes
+              colourScale = color_scale, # D3 format
+              fontSize = 12, nodeWidth = 30)
+
+onRender(p, '
+function(el, x) {
+  const svg = d3.select(el).select("svg");
+  const nodeGroups = svg.selectAll(".node");
+
+  // Get unique x positions of columns
+  const xPositions = [];
+  nodeGroups.each(function() {
+    const xVal = +d3.select(this).attr("transform").match(/translate\\(([^,]+)/)[1];
+    if (!xPositions.includes(xVal)) xPositions.push(xVal);
+  });
+
+  // Sort x positions so labels go in order left to right
+  xPositions.sort((a, b) => a - b);
+
+  // Your labels (must match number of unique x positions!)
+  const labels = ["Baseline", "OffCPB", "ICU", "ICU24h"];
+  const yPos = 10;
+
+  xPositions.forEach(function(x, i) {
+    svg.append("text")
+       .attr("x", x + 30) // slight offset to center above node column
+       .attr("y", yPos)
+       .attr("text-anchor", "middle")
+       .style("font-size", "14px")
+       .style("font-weight", "bold")
+       .text(labels[i]);
+  });
+}
+')
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Separate CVP and MAP Hemodynamics and Biomarkers Off CPB
+
+log2NGAL_UCR OffCPB-Baseline and pre+intra high CVP>12 minutes
+```{r,echo=FALSE}
+tidy(lm(biowide$log2NGAL_UCR_1_0~biowide$preintra_highcvpmins))%>%
+  mutate(across(where(is.numeric), round, digits = 4))
+```
+log2NGAL_UCR OffCPB as outcome and pre+intra high CVP>12 minutes + log2NGAL_UCR Baseline 
+
+```{r,echo=FALSE}
+tidy(lm(biowide$log2NGAL_UCR_1~biowide$preintra_highcvpmins+biowide$log2NGAL_UCR_0))%>%
+  mutate(across(where(is.numeric), round, digits = 4))
+```
+
+log2NGAL_UCR OffCPB-Baseline and pre+intra low MAP<65 minutes
+```{r,echo=FALSE}
+tidy(lm(biowide$log2NGAL_UCR_1_0~biowide$preintra_lowmapmins))%>%
+  mutate(across(where(is.numeric), round, digits = 4))
+```
+
+log2NGAL_UCR OffCPB as outcome and pre+intra low MAP<65 minutes + log2NGAL_UCR Baseline 
+
+```{r,echo=FALSE}
+tidy(lm(biowide$log2NGAL_UCR_1~biowide$preintra_lowmapmins+biowide$log2NGAL_UCR_0))%>%
+  mutate(across(where(is.numeric), round, digits = 4))
+```
+
+ 127 128 124 125 126 122 123
+
+
+## Swihart Lasagna Plots {.tabset}
+
+
+
+### Lasagna
+```{r,echo=FALSE}
+
+hemodynamics <- hemodynamics %>%
+  group_by(harbor_id) %>%
+  mutate(time_seconds = (row_number()-1) * 5) %>%
+  ungroup() %>%
+  mutate(mins = time_seconds / 60)
+
+
+hemodynamics <- hemodynamics %>%
+  mutate(harbor_id2 = factor(harbor_id)) %>% droplevels()
+
+
+hemodynamics$state <- ifelse(is.na(hemodynamics$state), "Missing", hemodynamics$state)
+hemodynamics$state <- factor(hemodynamics$state, levels = c("B", "W", "R", "Missing"))
+hemodynamics %>%ggplot(aes(x = mins, y = harbor_id2, fill = state))+geom_tile()+xlab("Minutes from Start of Surgery")+theme_minimal()+theme(axis.text.y=element_blank(),axis.ticks.y=element_blank(),axis.line.y=element_blank(),panel.grid.major.y=element_blank(),panel.grid.minor.y=element_blank())+ylab("Patient")+scale_fill_manual(
+    values = c("R" = "#DC3912", "W" = "lavender", "B" = "#3366CC","Missing" = "gray50"),
+    labels = c("R" = "Zone 3 - High Risk", "W" = "Zone 2 - Intermediate Risk", "B" = "Zone 1 - Low Risk", "Missing"="Missing"),
+    name = "Zones"  
+  )
+
+hemodynamics %>%
+  ggplot(aes(x = mins, y = harbor_id2, fill = state)) +
+  geom_tile() +
+  xlab("Minutes from Start of Surgery") +
+  ylab("Patient") +
+  scale_fill_manual(
+    values = c("R" = "#DC3912", "W" = "white", "B" = "#3366CC","Missing" = "gray50"),
+    labels = c("R" = "Zone 3 - High Risk", "W" = "Zone 2 - Intermediate Risk", "B" = "Zone 1 - Low Risk", "Missing"="Missing"),
+    name = "Zones"
+  ) +
+  theme_minimal(base_family = "Arial") +
+  theme(
+    plot.background = element_rect(fill = "black", color = NA),
+    panel.background = element_rect(fill = "black", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(color = "white"),
+    axis.title = element_text(color = "white"),
+    legend.background = element_rect(fill = "black", color = NA),
+    legend.key = element_rect(fill = "black", color = NA),
+    legend.text = element_text(color = "white"),
+    legend.title = element_text(color = "white"),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  )
+
+
+hemodynamics %>%
+  ggplot(aes(x = mins, y = harbor_id2, fill = state)) +
+  geom_tile() +
+  xlab("Minutes from Start of Surgery") +
+  ylab("Patient") +
+  scale_fill_manual(
+    values = c("R" = "#DC3912", "W" = "white", "B" = "#3366CC","Missing" = "gray50"),
+    labels = c("R" = "Zone 3 - High Risk", "W" = "Zone 2 - Intermediate Risk", "B" = "Zone 1 - Low Risk", "Missing"="Missing"),
+    name = "Zones"
+  ) +
+  theme_minimal(base_family = "Arial") +
+  theme(
+    plot.background = element_rect(fill = "black", color = NA),
+    panel.background = element_rect(fill = "black", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(color = "white"),
+    axis.title = element_text(color = "white"),
+    legend.background = element_rect(fill = "black", color = NA),
+    legend.key = element_rect(fill = "black", color = NA),
+    legend.text = element_text(color = "white"),
+    legend.title = element_text(color = "white"),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank(),
+    legend.position = "bottom"
+  )
+
+
+hemodynamics %>%
+  ggplot(aes(x = mins, y = harbor_id2, fill = state)) +
+  geom_tile() +
+  xlab("Minutes from Start of Surgery") +
+  ylab("Patient") +
+  scale_fill_manual(
+    values = c("R" = "#FE4D4D", "W" = "ghostwhite", "B" = "#94ACF6","Missing" = "gray50"),
+    labels = c("R" = "Zone 3 - High Risk", "W" = "Zone 2 - Intermediate Risk", "B" = "Zone 1 - Low Risk", "Missing"="Missing"),
+    name = "Zones"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "black", color = NA),  # Inner plot area
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  )
+
+hemodynamics %>%
+  ggplot(aes(x = mins, y = harbor_id2, fill = state)) +
+  geom_tile() +
+  xlab("Minutes from Start of Surgery") +
+  ylab("Patient") +
+  scale_fill_manual(
+    values = c("R" = "#FE4D4D", "W" = "ghostwhite", "B" = "#94ACF6","Missing" = "gray50"),
+    labels = c("R" = "Zone 3 - High Risk", "W" = "Zone 2 - Intermediate Risk", "B" = "Zone 1 - Low Risk", "Missing"="Missing"),
+    name = "Zones"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "gray15", color = NA),  # Inner plot area
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank(),
+    legend.position = "bottom"
+  )
+
+
+```
+
+
+### ORGANIZED BY AKI ON TOP THEN WITHIN GROUPS RED MINS
+```{r,echo=FALSE}
+
+hemodynamics_ids <- hemodynamics %>%
+  arrange(AKI_48, redmins) %>%
+  pull(harbor_id) %>%
+  unique()
+```
+
+
+```{r,echo=FALSE}
+hemodynamics %>%
+  arrange(AKI_48, redmins)%>% mutate(harbor_id2 = factor(harbor_id2, levels = hemodynamics_ids)) %>%
+  ggplot(aes(x = mins, y = harbor_id2, fill = state)) +
+  geom_tile() +
+  xlab("Minutes from Start of Surgery") +
+  ylab("Patient") +
+  scale_fill_manual(
+    values = c("R" = "#DC3912", "W" = "white", "B" = "#3366CC","Missing" = "gray50"),
+    labels = c("R" = "Zone 3 - High", "W" = "Zone 2 - Medium", "B" = "Zone 1 - Low", "Missing"="Missing"),
+    name = "Risk Zones"
+  ) +
+  theme_minimal(base_family = "Arial") +
+  theme(
+    plot.background = element_rect(fill = "black", color = NA),
+    panel.background = element_rect(fill = "black", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(color = "white"),
+    axis.title = element_text(color = "white"),
+    legend.background = element_rect(fill = "black", color = NA),
+    legend.key = element_rect(fill = "black", color = NA),
+    legend.text = element_text(color = "white"),
+    legend.title = element_text(color = "white"),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  )+theme(legend.position = c(0.94,0.3))+
+  annotate("text", x = -35, y = 114, label = "AKI", size = 3.5, color = "white")+  
+  annotate("text", x = -35, y = 52, label = str_wrap("No AKI", width = 3), size = 3.5, color = "white")+theme(
+  axis.title.y = element_text(
+    margin = margin(t = 0, r = -5, b = 0, l = 0)
+  ),
+      plot.margin = margin(t = 5, r = 30, b = 5, l = 5)
+)
+grid.brackets(145,730,145,115, lwd=2, col="white",h = 0.025)
+grid.brackets(145,105,145,15, lwd=2, col="white",h = 0.025)
+
+
+
+```
+
+
+
+### ORGANIZED BY NGAL AT ICU ARRIVAL- HIGH AT TOP
+
+```{r,echo=FALSE}
+hemodynamics= hemodynamics %>% left_join(biowide %>% select(harbor_id, log2NGAL_UCR_2),by="harbor_id")
+
+hemodynamics_ids <- hemodynamics %>%
+  arrange(log2NGAL_UCR_2) %>%
+  pull(harbor_id) %>%
+  unique()
+```
+
+
+```{r,echo=FALSE}
+hemodynamics %>%
+  arrange(log2NGAL_UCR_2)%>% mutate(harbor_id2 = factor(harbor_id2, levels = hemodynamics_ids)) %>%
+  ggplot(aes(x = mins, y = harbor_id2, fill = state)) +
+  geom_tile() +
+  xlab("Minutes from Start of Surgery") +
+  ylab("Patient") +
+  scale_fill_manual(
+    values = c("R" = "#DC3912", "W" = "white", "B" = "#3366CC","Missing" = "gray50"),
+    labels = c("R" = "Zone 3 - High", "W" = "Zone 2 - Medium", "B" = "Zone 1 - Low", "Missing"="Missing"),
+    name = "Risk Zones"
+  ) +
+  theme_minimal(base_family = "Arial") +
+  theme(
+    plot.background = element_rect(fill = "black", color = NA),
+    panel.background = element_rect(fill = "black", color = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(color = "white"),
+    axis.title = element_text(color = "white"),
+    legend.background = element_rect(fill = "black", color = NA),
+    legend.key = element_rect(fill = "black", color = NA),
+    legend.text = element_text(color = "white"),
+    legend.title = element_text(color = "white"),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  )+theme(legend.position = c(0.94,0.3))+
+theme(
+  axis.title.y = element_text(
+    margin = margin(t = 0, r = -5, b = 0, l = 0)
+  ),
+      plot.margin = margin(t = 5, r = 30, b = 5, l = 5))
+
+
+```
+
+### PROPORTION PLOTS
+
+```{r,echo=FALSE}
+
+plot_df = 
+  hemodynamics %>% 
+  filter(cat_cpb != "intra") %>% 
+  group_by(harbor_id2, cat_cpb) %>% 
+  mutate(time = as.numeric(difftime(wftime, min(wftime), units = "secs"))) %>% 
+  ungroup() %>% 
+  mutate(cat_cpb = factor(cat_cpb, levels = c("pre", "post"), labels= c("Pre-CPB", "Post-CPB")))
+
+# paletteer_d("colorBlindness::PairedColor12Steps")
+
+
+n_sub = unique(plot_df$harbor_id2) %>% length
+
+plot_df %>%
+  mutate(state = factor(state, levels = c("B", "W","R"))) %>% 
+  mutate(state = forcats::fct_na_value_to_level(state),
+         state = forcats::fct_rev(state)) %>% 
+  ggplot(aes(x = time / 60, fill = state, color = state)) +
+  geom_bar() +
+  facet_wrap(~cat_cpb, scales = "free_x") +
+  #scale_x_continuous(breaks=seq(0, 480, 30), labels = seq(0, 8, .5),
+                     #limits = c(0, 4*60)) +
+  theme_classic() +
+  labs(x = "Minutes", y = "Proportion") +
+  scale_color_manual(values = c("#FE4D4D", "ghostwhite","#94ACF6", "gray50"), na.translate = TRUE, 
+                     labels = c("Zone 3 - High Risk",
+                                "Zone 2 - Intermediate Risk",
+                                "Zone 1 - Low Risk",
+                                "Missing"), name = "") +
+   scale_fill_manual(values = c( "#FE4D4D", "ghostwhite","#94ACF6", "gray50"), na.translate = TRUE, 
+                     labels = c("Zone 3 - High Risk",
+                                "Zone 2 - Intermediate Risk",
+                                "Zone 1 - Low Risk",
+                                "Missing"), name = "") +
+  theme(legend.position = c(.85, .78),
+        legend.title = element_blank()) + 
+  scale_y_continuous(breaks = seq(0, n_sub, n_sub / 10), labels = seq(0, 1, .1))
+
+
+
+
+plot_df %>%
+  mutate(state = factor(state, levels = c("B", "W","R"))) %>% 
+  mutate(state = forcats::fct_na_value_to_level(state),
+         state = forcats::fct_rev(state)) %>% 
+  ggplot(aes(x = time / 60, fill = state, color = state)) +
+  geom_bar() +
+  facet_wrap(~cat_cpb, scales = "free_x") +
+  #scale_x_continuous(breaks=seq(0, 480, 30), labels = seq(0, 8, .5),
+                     #limits = c(0, 4*60)) +
+  theme_classic() +
+  labs(x = "Minutes", y = "Proportion") +
+  scale_color_manual(values = c("#FE4D4D", "ghostwhite","#94ACF6", "gray50"), na.translate = TRUE, 
+                     labels = c("Zone 3 - High Risk",
+                                "Zone 2 - Intermediate Risk",
+                                "Zone 1 - Low Risk",
+                                "Missing"), name = "") +
+   scale_fill_manual(values = c( "#FE4D4D", "ghostwhite","#94ACF6", "gray50"), na.translate = TRUE, 
+                     labels = c("Zone 3 - High Risk",
+                                "Zone 2 - Intermediate Risk",
+                                "Zone 1 - Low Risk",
+                                "Missing"), name = "") +
+  theme(legend.position = c(.85, .78),
+        legend.title = element_blank()) + 
+  scale_y_continuous(breaks = seq(0, n_sub, n_sub / 10), labels = seq(0, 1, .1))+theme(
+  panel.background = element_rect(fill = "black", color = NA),
+  legend.key = element_rect(fill = "white"),
+  strip.background = element_rect(fill = "white"),
+  strip.text = element_text(color = "black"),
+  axis.text = element_text(color = "black"),
+  axis.title = element_text(color = "black")
+)
+
+
+```
+
+
+## AKI|Zones - Logistic Models Per 5 minutes in Zone
+
+
+```{r,echo=FALSE}
+
+tidy(glm(AKI_48~blue5mins, data=biowide, family = binomial())) %>% filter(term !="(Intercept)")%>% mutate(
+    OR = exp(estimate)) %>% select(term, OR, std.error, statistic, p.value)
+tidy(glm(AKI_48~white5mins, data=biowide, family = binomial()))%>% filter(term !="(Intercept)")%>% mutate(
+    OR = exp(estimate)) %>% select(term, OR, std.error, statistic, p.value)
+tidy(glm(AKI_48~red5mins, data=biowide, family = binomial()))%>% filter(term !="(Intercept)")%>% mutate(
+    OR = exp(estimate)) %>% select(term, OR, std.error, statistic, p.value)
+tidy(glm(AKI_48 ~ blue5mins + white5mins + red5mins, 
+         data = biowide, family = binomial())) %>% mutate(
+    OR = exp(estimate)) %>% select(term, OR, std.error, statistic, p.value)
+tidy(glm(AKI_48 ~ blue5mins + white5mins + red5mins+MAPless65_5mins, 
+         data = biowide, family = binomial())) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) %>%
+  select(term, OR, CI_lower, CI_upper, std.error, statistic, p.value)
+
+```
+
+
+
+## Mixed Effects Model- Per 5 minutes in zones 
+
+### Correlation cpbtime and exposures
+
+Correlation of minutes in red zone whole surgery and cpbtime:
+```{r,echo=FALSE}
+cor(biowide$cpbtime,biowide$redmins)
+```
+
+Correlation of minutes in white zone whole surgery and cpbtime:
+```{r,echo=FALSE}
+cor(biowide$cpbtime,biowide$whitemins)
+```
+
+Correlation of minutes in blue zone whole surgery and cpbtime:
+
+```{r,echo=FALSE}
+cor(biowide$cpbtime,biowide$bluemins)
+```
+
+
+
+
+### log2NGAL_UCR including OffCPB, ICU {.tabset}
+
+```{r,include=FALSE}
+biomarkers2= biomarkers %>% filter(!timepoint  %in% c("PreCPB","24hICU")) %>% select(harbor_id,timepoint,log2NGAL_UCR)
+timepoint_1_values <- biomarkers2 %>%
+  filter(timepoint == "Baseline") %>%
+  select(harbor_id, baseline_value = log2NGAL_UCR)
+biomarkers2 = biomarkers2%>%
+  filter(timepoint != "Baseline") %>%
+  left_join(timepoint_1_values, by = "harbor_id")
+
+offcpb_hemo = hemodynamics %>% group_by(harbor_id) %>% filter(wftime<=cpboff_last) %>% mutate(harbor_id=as.integer(harbor_id))%>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60, MAPless65_5mins= sum(MAP<65,na.rm=TRUE)/60)%>% mutate(timepoint=rep("OffCPB",n()))
+
+icu_hemo =  hemodynamics %>% group_by(harbor_id) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60, MAPless65_5mins= sum(MAP<65,na.rm=TRUE)/60)%>% mutate(timepoint=rep("ICU",n()))
+
+
+biomarkers2= biomarkers2 %>% left_join(rbind(offcpb_hemo,icu_hemo),by=c("harbor_id","timepoint")) %>% drop_na() %>% left_join(biowide%>% select(harbor_id, cpbtime,proctime),by="harbor_id")
+
+biomarkers2=biomarkers2 %>% mutate(ngal_diff=log2NGAL_UCR-baseline_value)
+
+# head(biomarkers2)
+```
+
+
+#### Red Zone
+
+$log2NGALUCRminusbaseline_{ij}= \beta_0+\beta_1*redzone_{ij}+u_{i}+\epsilon_{ij}$  
+where i is patient and j is offcpb or icu timepoint
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+Predicted change in Log2NGAL_UCR at median red zone per 5 minutes:
+```{r,echo=FALSE}
+newdata <- data.frame(redzone5mins = median(biowide$red5mins), harbor_id = "any_id")
+as.numeric(predict(m1, newdata = newdata, level = 0))
+```
+
+Predicted change in Log2NGAL_UCR at 90% of median red zone per 5minutes:
+```{r,echo=FALSE}
+newdata <- data.frame(redzone5mins = 0.9*median(biowide$red5mins), harbor_id = "any_id")
+as.numeric(predict(m1, newdata = newdata, level = 0))
+```
+
+
+
+#### Red Zone + White Zone + Blue Zone
+
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone + CPBTime
+
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins+cpbtime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone + Proctime
+
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins+proctime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+### Time MAP<65 Models
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins+MAPless65_5mins, random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+### log2NGAL_UCR including OffCPB, ICU, 24hICU{.tabset}
+
+
+```{r,include=FALSE}
+biomarkers2= biomarkers %>% filter(!timepoint  %in% c("PreCPB")) %>% select(harbor_id,timepoint,log2NGAL_UCR)
+timepoint_1_values <- biomarkers2 %>%
+  filter(timepoint == "Baseline") %>%
+  select(harbor_id, baseline_value = log2NGAL_UCR)
+biomarkers2 = biomarkers2%>%
+  filter(timepoint != "Baseline") %>%
+  left_join(timepoint_1_values, by = "harbor_id")
+
+offcpb_hemo = hemodynamics %>% group_by(harbor_id) %>% filter(wftime<=cpboff_last) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("OffCPB",n()))
+
+icu_hemo =  hemodynamics %>% group_by(harbor_id) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("ICU",n()))
+
+icu24_hemo =  hemodynamics %>% group_by(harbor_id)%>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("24hICU",n()))
+
+
+biomarkers2= biomarkers2 %>% left_join(rbind(offcpb_hemo,icu_hemo,icu24_hemo),by=c("harbor_id","timepoint")) %>% drop_na() %>% left_join(biowide%>% select(harbor_id, cpbtime,proctime),by="harbor_id")
+
+biomarkers2=biomarkers2 %>% mutate(ngal_diff=log2NGAL_UCR-baseline_value)
+
+# head(biomarkers2)
+```
+
+
+#### Red Zone
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+#### Red Zone + White Zone + Blue Zone + CPBTime
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins+cpbtime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+#### Red Zone + White Zone + Blue Zone + Proctime
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins+proctime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+### RAW NGAL_UCR including OffCPB, ICU {.tabset}
+
+```{r,include=FALSE}
+biomarkers2= biomarkers %>% filter(!timepoint  %in% c("PreCPB","24hICU")) %>% select(harbor_id,timepoint,NGAL_UCR)
+timepoint_1_values <- biomarkers2 %>%
+  filter(timepoint == "Baseline") %>%
+  select(harbor_id, baseline_value = NGAL_UCR)
+biomarkers2 = biomarkers2%>%
+  filter(timepoint != "Baseline") %>%
+  left_join(timepoint_1_values, by = "harbor_id")
+
+offcpb_hemo = hemodynamics %>% group_by(harbor_id) %>% filter(wftime<=cpboff_last) %>% mutate(harbor_id=as.integer(harbor_id))%>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("OffCPB",n()))
+
+icu_hemo =  hemodynamics %>% group_by(harbor_id) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("ICU",n()))
+
+
+biomarkers2= biomarkers2 %>% left_join(rbind(offcpb_hemo,icu_hemo),by=c("harbor_id","timepoint")) %>% drop_na() %>% left_join(biowide%>% select(harbor_id, cpbtime,proctime),by="harbor_id")
+
+biomarkers2=biomarkers2 %>% mutate(ngal_diff=NGAL_UCR-baseline_value)
+
+# head(biomarkers2)
+```
+
+
+#### Red Zone
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+Predicted change in NGAL_UCR at median red zone per 5 minutes:
+```{r,echo=FALSE}
+newdata <- data.frame(redzone5mins = median(biowide$red5mins), harbor_id = "any_id")
+as.numeric(predict(m1, newdata = newdata, level = 0))
+```
+
+Predicted change in NGAL_UCR at 90% of median red zone per 5minutes:
+```{r,echo=FALSE}
+newdata <- data.frame(redzone5mins = 0.9*median(biowide$red5mins), harbor_id = "any_id")
+as.numeric(predict(m1, newdata = newdata, level = 0))
+```
+
+
+
+
+#### Red Zone + White Zone + Blue Zone
+
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone + CPBTime
+
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins+cpbtime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone + Proctime
+
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins+proctime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+
+### RAW NGAL_UCR including OffCPB, ICU, 24hICU{.tabset}
+
+
+```{r,include=FALSE}
+biomarkers2= biomarkers %>% filter(!timepoint  %in% c("PreCPB")) %>% select(harbor_id,timepoint,NGAL_UCR)
+timepoint_1_values <- biomarkers2 %>%
+  filter(timepoint == "Baseline") %>%
+  select(harbor_id, baseline_value = NGAL_UCR)
+biomarkers2 = biomarkers2%>%
+  filter(timepoint != "Baseline") %>%
+  left_join(timepoint_1_values, by = "harbor_id")
+
+offcpb_hemo = hemodynamics %>% group_by(harbor_id) %>% filter(wftime<=cpboff_last) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("OffCPB",n()))
+
+icu_hemo =  hemodynamics %>% group_by(harbor_id) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("ICU",n()))
+
+icu24_hemo =  hemodynamics %>% group_by(harbor_id)%>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("24hICU",n()))
+
+
+biomarkers2= biomarkers2 %>% left_join(rbind(offcpb_hemo,icu_hemo,icu24_hemo),by=c("harbor_id","timepoint")) %>% drop_na() %>% left_join(biowide%>% select(harbor_id, cpbtime,proctime),by="harbor_id")
+
+biomarkers2=biomarkers2 %>% mutate(ngal_diff=NGAL_UCR-baseline_value)
+
+# head(biomarkers2)
+```
+
+
+#### Red Zone
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed" ,conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+#### Red Zone + White Zone + Blue Zone + CPBTime
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins+cpbtime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+#### Red Zone + White Zone + Blue Zone + Proctime
+
+```{r,echo=FALSE}
+m1 <- lme(ngal_diff ~ redzone5mins+whitezone5mins+bluezone5mins+proctime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+
+
+### log2YKL_UCR including OffCPB, ICU{.tabset}
+
+
+```{r,include=FALSE}
+biomarkers2= biomarkers %>% filter(!timepoint  %in% c("PreCPB","24hICU")) %>% select(harbor_id,timepoint,log2YKL_UCR)
+timepoint_1_values <- biomarkers2 %>%
+  filter(timepoint == "Baseline") %>%
+  select(harbor_id, baseline_value = log2YKL_UCR)
+biomarkers2 = biomarkers2%>%
+  filter(timepoint != "Baseline") %>%
+  left_join(timepoint_1_values, by = "harbor_id")
+
+offcpb_hemo = hemodynamics %>% group_by(harbor_id) %>% filter(wftime<=cpboff_last)  %>% mutate(harbor_id=as.integer(harbor_id))%>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("OffCPB",n()))
+
+icu_hemo =  hemodynamics %>% group_by(harbor_id) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("ICU",n()))
+
+biomarkers2= biomarkers2 %>% left_join(rbind(offcpb_hemo,icu_hemo),by=c("harbor_id","timepoint")) %>% drop_na() %>% left_join(biowide%>% select(harbor_id, cpbtime,proctime),by="harbor_id")
+
+biomarkers2=biomarkers2 %>% mutate(ykl_diff=log2YKL_UCR-baseline_value)
+
+# head(biomarkers2)
+```
+
+
+#### Red Zone
+
+
+
+```{r,echo=FALSE}
+m1 <- lme(ykl_diff ~ redzone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone
+
+```{r,echo=FALSE}
+m1 <- lme(ykl_diff ~ redzone5mins+whitezone5mins+bluezone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+#### Red Zone + White Zone + Blue Zone + CPBTime
+
+```{r,echo=FALSE}
+m1 <- lme(ykl_diff ~ redzone5mins+whitezone5mins+bluezone5mins+cpbtime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone + Proctime
+
+```{r,echo=FALSE}
+m1 <- lme(ykl_diff ~ redzone5mins+whitezone5mins+bluezone5mins+proctime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+
+### log2YKL_UCR including OffCPB, ICU, 24hICU{.tabset}
+
+
+```{r,include=FALSE}
+biomarkers2= biomarkers %>% filter(!timepoint  %in% c("PreCPB")) %>% select(harbor_id,timepoint,log2YKL_UCR)
+timepoint_1_values <- biomarkers2 %>%
+  filter(timepoint == "Baseline") %>%
+  select(harbor_id, baseline_value = log2YKL_UCR)
+biomarkers2 = biomarkers2%>%
+  filter(timepoint != "Baseline") %>%
+  left_join(timepoint_1_values, by = "harbor_id")
+
+offcpb_hemo = hemodynamics %>% group_by(harbor_id) %>% filter(wftime<=cpboff_last) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("OffCPB",n()))
+
+icu_hemo =  hemodynamics %>% group_by(harbor_id) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("ICU",n()))
+
+icu24_hemo =  hemodynamics %>% group_by(harbor_id)%>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("24hICU",n()))
+
+
+biomarkers2= biomarkers2 %>% left_join(rbind(offcpb_hemo,icu_hemo,icu24_hemo),by=c("harbor_id","timepoint")) %>% drop_na() %>% left_join(biowide%>% select(harbor_id, cpbtime,proctime),by="harbor_id")
+
+biomarkers2=biomarkers2 %>% mutate(ykl_diff=log2YKL_UCR-baseline_value)
+
+# head(biomarkers2)
+```
+
+
+#### Red Zone
+
+```{r,echo=FALSE}
+m1 <- lme(ykl_diff ~ redzone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone
+
+```{r,echo=FALSE}
+m1 <- lme(ykl_diff ~ redzone5mins+whitezone5mins+bluezone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+#### Red Zone + White Zone + Blue Zone + CPBTime
+
+```{r,echo=FALSE}
+m1 <- lme(ykl_diff ~ redzone5mins+whitezone5mins+bluezone5mins+cpbtime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone + Proctime
+
+```{r,echo=FALSE}
+m1 <- lme(ykl_diff ~ redzone5mins+whitezone5mins+bluezone5mins+proctime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+### Akiscore including OffCPB, ICU{.tabset}
+
+
+```{r,include=FALSE}
+biomarkers2= biomarkers %>% filter(!timepoint  %in% c("PreCPB","24hICU")) %>% select(harbor_id,timepoint,akiscore)
+timepoint_1_values <- biomarkers2 %>%
+  filter(timepoint == "Baseline") %>%
+  select(harbor_id, baseline_value = akiscore)
+biomarkers2 = biomarkers2%>%
+  filter(timepoint != "Baseline") %>%
+  left_join(timepoint_1_values, by = "harbor_id")
+
+offcpb_hemo = hemodynamics %>% group_by(harbor_id) %>% filter(wftime<=cpboff_last) %>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("OffCPB",n()))
+
+icu_hemo =  hemodynamics %>% group_by(harbor_id) %>% mutate(harbor_id=as.integer(harbor_id))%>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60)%>% mutate(timepoint=rep("ICU",n()))
+
+biomarkers2= biomarkers2 %>% left_join(rbind(offcpb_hemo,icu_hemo),by=c("harbor_id","timepoint")) %>% drop_na() %>% left_join(biowide%>% select(harbor_id, cpbtime,proctime),by="harbor_id")
+
+biomarkers2=biomarkers2 %>% mutate(nephro_diff=akiscore-baseline_value)
+
+# head(biomarkers2)
+```
+
+
+#### Red Zone
+
+
+```{r,echo=FALSE}
+m1 <- lme(nephro_diff ~ redzone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone
+
+```{r,echo=FALSE}
+m1 <- lme(nephro_diff ~ redzone5mins+whitezone5mins+bluezone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+#### Red Zone + White Zone + Blue Zone + CPBTime
+
+```{r,echo=FALSE}
+m1 <- lme(nephro_diff ~ redzone5mins+whitezone5mins+bluezone5mins+cpbtime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+
+#### Red Zone + White Zone + Blue Zone + Proctime
+
+```{r,echo=FALSE}
+m1 <- lme(nephro_diff ~ redzone5mins+whitezone5mins+bluezone5mins+proctime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+### Akiscore including OffCPB, ICU, 24hICU {.tabset}
+
+```{r,include=FALSE}
+biomarkers2= biomarkers %>% filter(!timepoint  %in% c("PreCPB")) %>% select(harbor_id,timepoint,akiscore)
+timepoint_1_values <- biomarkers2 %>%
+  filter(timepoint == "Baseline") %>%
+  select(harbor_id, baseline_value = akiscore)
+biomarkers2 = biomarkers2%>%
+  filter(timepoint != "Baseline") %>%
+  left_join(timepoint_1_values, by = "harbor_id")
+
+offcpb_hemo = hemodynamics %>% group_by(harbor_id) %>% filter(wftime<=cpboff_last) %>% mutate(harbor_id=as.integer(harbor_id))%>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60,MAPless65_5mins= sum(MAP<65,na.rm=TRUE)/60)%>% mutate(timepoint=rep("OffCPB",n()))
+
+icu_hemo =  hemodynamics %>% group_by(harbor_id) %>% mutate(harbor_id=as.integer(harbor_id))%>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60,MAPless65_5mins= sum(MAP<65,na.rm=TRUE)/60)%>% mutate(timepoint=rep("ICU",n()))
+
+icu24_hemo =  hemodynamics %>% group_by(harbor_id)%>% mutate(harbor_id=as.integer(harbor_id)) %>% summarise(redzone5mins=sum(state=="R", na.rm = TRUE)  / 60,whitezone5mins=sum(state=="W", na.rm = TRUE)  / 60,bluezone5mins=sum(state=="B", na.rm = TRUE)  / 60,MAPless65_5mins= sum(MAP<65,na.rm=TRUE)/60)%>% mutate(timepoint=rep("24hICU",n()))
+
+
+biomarkers2= biomarkers2 %>% left_join(rbind(offcpb_hemo,icu_hemo,icu24_hemo),by=c("harbor_id","timepoint")) %>% drop_na() %>% left_join(biowide%>% select(harbor_id, cpbtime,proctime),by="harbor_id")
+
+biomarkers2=biomarkers2 %>% mutate(nephro_diff=akiscore-baseline_value)
+
+# head(biomarkers2)
+```
+
+
+#### Red Zone
+
+```{r,echo=FALSE}
+m1 <- lme(nephro_diff ~ redzone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+#### Red Zone + White Zone + Blue Zone
+
+```{r,echo=FALSE}
+m1 <- lme(nephro_diff ~ redzone5mins+whitezone5mins+bluezone5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+#### Red Zone + White Zone + Blue Zone + CPBTime
+
+```{r,echo=FALSE}
+m1 <- lme(nephro_diff ~ redzone5mins+whitezone5mins+bluezone5mins+cpbtime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+#### Red Zone + White Zone + Blue Zone + Proctime
+
+```{r,echo=FALSE}
+m1 <- lme(nephro_diff ~ redzone5mins+whitezone5mins+bluezone5mins+proctime , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+#### Red Zone + White Zone + Blue Zone + MAP <65
+
+```{r,echo=FALSE}
+m1 <- lme(nephro_diff ~ redzone5mins+whitezone5mins+bluezone5mins+MAPless65_5mins , random=~1 | harbor_id, data = biomarkers2)
+tidy(m1, effects = "fixed", conf.int = TRUE, conf.level = 0.95)%>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+```
+
+
+
+
+```{r,include=FALSE}
+set.seed(12345)
+samp=sample_n(biowide%>%select(harbor_id,NGAL_1,NGAL_UCR_1,log2NGAL_1,log2NGAL_UCR_1),size = 55,replace = FALSE)
+summary(samp$log2NGAL_UCR_1)
+
+write.csv(samp,"sample.csv")
+```
+
+
+## Hemodynamic Zones- Linear Models {.tabset}
+
+### blue, white, red, outcome(difference log2NGAL_UCR ICU minus Baseline)
+```{r,echo=FALSE}
+tidy(lm(log2NGAL_2_0~ bluemins+whitemins+redmins,data=biowide))
+```
+
+Per 5 mins in zone:
+
+```{r,echo=FALSE}
+tidy(lm(log2NGAL_2_0~ blue5mins+white5mins+red5mins,data=biowide))
+```
+
+
+### blue, white red, outcome(difference nephrocheck ICU minus Baseline)
+
+Raw nephrocheck 
+
+```{r,echo=FALSE}
+tidy(lm(akiscore_2_0~ bluemins+whitemins+redmins,data=biowide))
+```
+
+Raw nephrocheck per 5 mins in zone:
+
+```{r,echo=FALSE}
+tidy(lm(akiscore_2_0~ blue5mins+white5mins+red5mins,data=biowide))
+```
+
+Log2 nephrocheck 
+
+```{r,echo=FALSE}
+tidy(lm(log2akiscore_2_0~ bluemins+whitemins+redmins,data=biowide))
+```
+
+Log2 nephrocheck  per 5 mins in zone:
+
+```{r,echo=FALSE}
+tidy(lm(log2akiscore_2_0~ blue5mins+white5mins+red5mins,data=biowide))
+```
+
+
+### blue, white red, outcome(difference nephrocheck 24 hour minus Baseline)
+
+Raw nephrocheck 
+
+```{r,echo=FALSE}
+tidy(lm(akiscore_3_0~ bluemins+whitemins+redmins,data=biowide))
+```
+
+Raw nephrocheck per 5 mins in zone:
+
+```{r,echo=FALSE}
+tidy(lm(akiscore_3_0~ blue5mins+white5mins+red5mins,data=biowide))
+```
+
+Log2 nephrocheck 
+
+```{r,echo=FALSE}
+tidy(lm(log2akiscore_3_0~ bluemins+whitemins+redmins,data=biowide))
+```
+
+Log2 nephrocheck  per 5 mins in zone:
+
+```{r,echo=FALSE}
+tidy(lm(log2akiscore_3_0~ blue5mins+white5mins+red5mins,data=biowide))
+```
+
+
+
+
+## Geometric Means 
+
+### NGAL
+
+```{r, echo=FALSE}
+biomarkers %>% group_by(timepoint) %>%
+  summarise(geometric_mean = geometric.mean(NGAL), .groups = "drop")
+```
+
+### NGAL_UCR
+
+```{r, echo=FALSE}
+biomarkers %>% group_by(timepoint) %>%
+  summarise(geometric_mean = geometric.mean(NGAL_UCR), .groups = "drop")
+```
+
+
+### YKL
+```{r, echo=FALSE}
+biomarkers %>% group_by(timepoint) %>%
+  summarise(geometric_mean = exp(mean(log(YKL), na.rm = TRUE)), .groups = "drop")
+```
+
+### YKL_UCR
+```{r, echo=FALSE}
+biomarkers %>% group_by(timepoint) %>%
+  summarise(geometric_mean = exp(mean(log(YKL_UCR), na.rm = TRUE)), .groups = "drop")
+```
+
+### nephrocheck
+
+```{r, echo=FALSE}
+biomarkers %>% group_by(timepoint) %>%
+  summarise(geometric_mean = geometric.mean(akiscore), .groups = "drop")
+```
+
+```{r, echo=FALSE}
+biomarkers %>% group_by(timepoint) %>% filter(akiscore>0) %>%
+  summarise(geometric_mean = geometric.mean(akiscore), .groups = "drop")
+```
+
+
+
+
+
+
+
+
+
+
